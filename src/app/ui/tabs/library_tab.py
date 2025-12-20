@@ -408,7 +408,43 @@ class LibraryTab(QWidget):
         self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files, update_text, update_image))
         self._start_index(files, update_text, update_image)
 
-    def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool):
+
+    def _start_index(self, files: List[Dict[str, Any]]):
+        render_status = None
+        try:
+            render_status = self.ctx.indexer.renderer.status()
+        except Exception:
+            render_status = None
+        if render_status and not render_status.get("available", False):
+            status_map = render_status.get("status") or {}
+            status_lines = []
+            libreoffice_status = status_map.get("libreoffice")
+            windows_status = status_map.get("windows_com")
+            if libreoffice_status:
+                status_lines.append(f"LibreOffice：{libreoffice_status}")
+            if windows_status:
+                status_lines.append(f"PowerPoint（Windows COM）：{windows_status}")
+            status_detail = "\n".join(status_lines)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("未偵測到可用的 renderer")
+            box.setText(
+                "目前沒有可用的投影片 renderer（LibreOffice/PowerPoint）。"
+                "此輪索引將只建立文字索引，不會產生縮圖。"
+            )
+            box.setInformativeText(
+                "Renderer 是系統層級的投影片軟體，無法透過 requirements.txt 安裝。"
+                "請先安裝 LibreOffice 或 PowerPoint 後再重試。要繼續索引嗎？"
+            )
+            if status_detail:
+                box.setDetailedText(status_detail)
+            box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+            box.setDefaultButton(QMessageBox.Ok)
+            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            if box.exec() != QMessageBox.Ok:
+                return
+
+
         self._cancel_index = False
         self._pause_index = False
         self.btn_cancel.setEnabled(True)
