@@ -88,12 +88,26 @@ class IndexService:
         *,
         on_progress: Optional[Callable[[IndexProgress], None]] = None,
         cancel_flag: Optional[Callable[[], bool]] = None,
+        pause_flag: Optional[Callable[[], bool]] = None,
     ) -> Tuple[int, str]:
         """索引指定檔案（增量）：先移除舊 entries，再寫入新 entries。"""
 
         def progress(stage: str, cur: int, total: int, msg: str) -> None:
             if on_progress:
                 on_progress(IndexProgress(stage=stage, current=cur, total=total, message=msg))
+
+        def wait_if_paused(cur: int, total: int) -> bool:
+            if not pause_flag:
+                return True
+            paused_notified = False
+            while pause_flag():
+                if cancel_flag and cancel_flag():
+                    return False
+                if not paused_notified:
+                    progress("pause", cur, total, "已暫停，等待續跑...")
+                    paused_notified = True
+                time.sleep(0.2)
+            return True
 
         index = self.store.load_index()
         slides = [s for s in index.get("slides", []) if isinstance(s, dict)]
@@ -107,6 +121,8 @@ class IndexService:
         for fi, f in enumerate(files, start=1):
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
+            if not wait_if_paused(fi, total_files):
+                return 1, "已取消"
 
             abs_path = f.get("abs_path")
             file_hash = f.get("file_hash")
@@ -119,6 +135,8 @@ class IndexService:
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
+            if not wait_if_paused(fi, total_files):
+                return 1, "已取消"
 
             progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
             rr = self.renderer.render_pptx(pptx, file_hash, slides_count=len(slide_texts))
@@ -126,6 +144,8 @@ class IndexService:
             thumbs = rr.thumbs
 
             if cancel_flag and cancel_flag():
+                return 1, "已取消"
+            if not wait_if_paused(fi, total_files):
                 return 1, "已取消"
 
             progress("embed", fi, total_files, f"產生向量：{pptx.name}")
@@ -137,6 +157,8 @@ class IndexService:
             new_entries = []
             for si, st in enumerate(slide_texts, start=1):
                 if cancel_flag and cancel_flag():
+                    return 1, "已取消"
+                if not wait_if_paused(fi, total_files):
                     return 1, "已取消"
 
                 thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None

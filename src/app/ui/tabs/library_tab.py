@@ -39,6 +39,7 @@ class LibraryTab(QWidget):
         self.ctx = None
 
         self._cancel_index = False
+        self._pause_index = False
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -68,13 +69,16 @@ class LibraryTab(QWidget):
         self.btn_index_needed = QPushButton("開始索引（需要者）")
         self.btn_index_selected = QPushButton("開始索引（選取檔案）")
         self.btn_clear_missing = QPushButton("清理缺失項目")
+        self.btn_pause = QPushButton("暫停")
         self.btn_cancel = QPushButton("取消")
+        self.btn_pause.setEnabled(False)
         self.btn_cancel.setEnabled(False)
 
         left_layout.addWidget(self.btn_scan)
         left_layout.addWidget(self.btn_index_needed)
         left_layout.addWidget(self.btn_index_selected)
         left_layout.addWidget(self.btn_clear_missing)
+        left_layout.addWidget(self.btn_pause)
         left_layout.addWidget(self.btn_cancel)
         left_layout.addStretch(1)
 
@@ -118,6 +122,7 @@ class LibraryTab(QWidget):
         self.btn_index_needed.clicked.connect(self.start_index_needed)
         self.btn_index_selected.clicked.connect(self.start_index_selected)
         self.btn_clear_missing.clicked.connect(self.clear_missing_files)
+        self.btn_pause.clicked.connect(self.toggle_pause_indexing)
         self.btn_cancel.clicked.connect(self.cancel_indexing)
         self.filter_edit.textChanged.connect(self.refresh_table)
 
@@ -307,7 +312,10 @@ class LibraryTab(QWidget):
 
     def _start_index(self, files: List[Dict[str, Any]]):
         self._cancel_index = False
+        self._pause_index = False
         self.btn_cancel.setEnabled(True)
+        self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("暫停")
         self.btn_index_needed.setEnabled(False)
         self.btn_index_selected.setEnabled(False)
 
@@ -322,7 +330,15 @@ class LibraryTab(QWidget):
             def progress_hook(p):
                 _progress_emit(p)
 
-            return self.ctx.indexer.rebuild_for_files(files, on_progress=progress_hook, cancel_flag=cancelled)
+            def paused() -> bool:
+                return self._pause_index
+
+            return self.ctx.indexer.rebuild_for_files(
+                files,
+                on_progress=progress_hook,
+                cancel_flag=cancelled,
+                pause_flag=paused,
+            )
 
         w = Worker(task, None)
         # 將 signals.progress.emit 注入到 task 參數
@@ -349,8 +365,19 @@ class LibraryTab(QWidget):
         self._cancel_index = True
         self.prog_label.setText("取消中...")
 
+    def toggle_pause_indexing(self) -> None:
+        self._pause_index = not self._pause_index
+        if self._pause_index:
+            self.btn_pause.setText("續跑")
+            self.prog_label.setText("已暫停")
+        else:
+            self.btn_pause.setText("暫停")
+            self.prog_label.setText("索引中...")
+
     def _on_index_done(self, result: object) -> None:
         self.btn_cancel.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("暫停")
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self.refresh_table()
@@ -370,6 +397,8 @@ class LibraryTab(QWidget):
         log.error("背景任務錯誤\n%s", tb)
         QMessageBox.critical(self, "發生錯誤", "發生錯誤。請複製以下訊息並發送給您的 AI 助手：\n\n" + tb)
         self.btn_cancel.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("暫停")
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self.prog_label.setText("發生錯誤")
