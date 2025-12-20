@@ -14,9 +14,10 @@ from app.core.logging import get_logger
 from app.services.catalog_service import CatalogService
 from app.services.embedding_service import EmbeddingConfig, EmbeddingService
 from app.services.extraction_service import ExtractionService
-from app.services.image_embedder import ImageEmbedder
+from app.services.image_embedder import ImageEmbeddingService
 from app.services.project_store import ProjectStore
 from app.services.render_service import RenderService
+from app.utils.text import tokenize
 from app.utils.vectors import vec_to_b64_f32
 
 log = get_logger(__name__)
@@ -48,8 +49,8 @@ class IndexService:
 
         self.extractor = ExtractionService()
         self.renderer = RenderService(self.store.paths.thumbs_dir)
-        self.image_embedder = ImageEmbedder(self.store.paths.cache_dir / "rerankTexure.onnx", dim=self.emb_cfg.image_dim)
-        self.embeddings = EmbeddingService(api_key, self.emb_cfg)
+        self.image_embedder = ImageEmbeddingService(self.store.paths.cache_dir, version="1")
+        self.embeddings = EmbeddingService(api_key, self.emb_cfg, cache_dir=self.store.paths.cache_dir)
 
     def compute_needed_files(self) -> List[Dict[str, Any]]:
         cat = self.store.load_catalog()
@@ -102,6 +103,7 @@ class IndexService:
         slides = [s for s in slides if s.get("file_path") not in target_paths]
 
         total_files = len(files)
+        render_message = ""
         for fi, f in enumerate(files, start=1):
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
@@ -120,6 +122,7 @@ class IndexService:
 
             progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
             rr = self.renderer.render_pptx(pptx, file_hash, slides_count=len(slide_texts))
+            render_message = rr.message
             thumbs = rr.thumbs
 
             if cancel_flag and cancel_flag():
@@ -140,14 +143,14 @@ class IndexService:
                 img_vec_b64 = None
 
                 # 若縮圖存在且非空，做 image embedding（可退化）
-                try:
-                    if thumb_path:
+                if thumb_path:
+                    try:
                         b = Path(thumb_path).read_bytes()
                         if b:
-                            img_vec = self.image_embedder.embed_image_bytes(b)
+                            img_vec = self.image_embedder.embed_image_bytes(b, dim=self.emb_cfg.image_dim)
                             img_vec_b64 = vec_to_b64_f32(img_vec)
-                except Exception:
-                    img_vec_b64 = None
+                    except Exception:
+                        img_vec_b64 = None
 
                 tv = text_vecs[si - 1] if si - 1 < len(text_vecs) else np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
                 tv_b64 = vec_to_b64_f32(tv)
@@ -176,6 +179,7 @@ class IndexService:
                         "title": st.title,
                         "body": st.body,
                         "all_text": st.all_text,
+                        "bm25_tokens": tokenize(st.all_text),
                         "thumb_path": thumb_path,
                         "text_vec": tv_b64,
                         "image_vec": img_vec_b64,
@@ -196,6 +200,14 @@ class IndexService:
             "vector_encoding": "base64_f32",
             "text_source": "openai" if self.embeddings.has_openai() else "fallback_hash",
             "image_source": "onnx" if self.image_embedder.enabled_onnx() else "fallback_hash",
+            "image_model_version": self.image_embedder.status().version,
+        }
+        render_status = self.renderer.status()
+        index["render"] = {
+            "available": render_status.get("available"),
+            "active": render_status.get("active"),
+            "status": render_status.get("status"),
+            "last_message": render_message,
         }
         self.store.save_index(index)
 

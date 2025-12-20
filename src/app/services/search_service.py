@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,30 +11,10 @@ import numpy as np
 from app.core.logging import get_logger
 from app.services.embedding_service import EmbeddingConfig, EmbeddingService
 from app.services.project_store import ProjectStore
+from app.utils.text import tokenize
 from app.utils.vectors import b64_f32_to_vec, cosine_similarity, normalize_l2
 
 log = get_logger(__name__)
-
-
-_WORD_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]+", re.UNICODE)
-
-
-def tokenize(text: str) -> List[str]:
-    text = (text or "").strip().lower()
-    if not text:
-        return []
-    toks: List[str] = []
-    for m in _WORD_RE.finditer(text):
-        s = m.group(0)
-        if not s:
-            continue
-        # CJK 長字串：拆成字 + 2-gram，提高召回
-        if re.fullmatch(r"[\u4e00-\u9fff]+", s) and len(s) > 1:
-            toks.extend(list(s))
-            toks.extend([s[i : i + 2] for i in range(len(s) - 1)])
-        else:
-            toks.append(s)
-    return toks
 
 
 @dataclass
@@ -66,7 +44,7 @@ class SearchService:
             text_dim=int(emb.get("text_dim", 1536)),
             image_dim=int(emb.get("image_dim", 4096)),
         )
-        self.embeddings = EmbeddingService(api_key, self.emb_cfg)
+        self.embeddings = EmbeddingService(api_key, self.emb_cfg, cache_dir=self.store.paths.cache_dir)
 
     def search(self, q: SearchQuery, image_vec: Optional[np.ndarray] = None) -> List[SearchResult]:
         index = self.store.load_index()
@@ -112,12 +90,12 @@ class SearchService:
             qset = set(tokenize(query_text))
             out = []
             for s in slides:
-                toks = tokenize(s.get("all_text", ""))
+                toks = s.get("bm25_tokens") or tokenize(s.get("all_text", ""))
                 tset = set(toks)
                 out.append(float(len(qset & tset)))
             return out
 
-        corpus = [tokenize(s.get("all_text", "")) for s in slides]
+        corpus = [s.get("bm25_tokens") or tokenize(s.get("all_text", "")) for s in slides]
         bm25 = BM25Okapi(corpus)
         qtok = tokenize(query_text)
         scores = bm25.get_scores(qtok)
