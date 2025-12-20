@@ -12,7 +12,7 @@ from app.utils.json_io import atomic_write_json, read_json
 log = get_logger(__name__)
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 @dataclass
@@ -76,9 +76,24 @@ class ProjectStore:
                 "project_name": "Local Slide Manager",
                 "whitelist_dirs": [],
             }
-        # v1.0 無遷移
         if "whitelist_dirs" not in data or not isinstance(data["whitelist_dirs"], list):
             data["whitelist_dirs"] = []
+        migrated = []
+        for entry in data.get("whitelist_dirs", []):
+            if isinstance(entry, str):
+                migrated.append({"path": entry, "enabled": True, "recursive": True})
+            elif isinstance(entry, dict):
+                path = str(entry.get("path", "")).strip()
+                if not path:
+                    continue
+                migrated.append(
+                    {
+                        "path": path,
+                        "enabled": bool(entry.get("enabled", True)),
+                        "recursive": bool(entry.get("recursive", True)),
+                    }
+                )
+        data["whitelist_dirs"] = migrated
         data["schema_version"] = str(data.get("schema_version", SCHEMA_VERSION))
         return data
 
@@ -87,6 +102,7 @@ class ProjectStore:
         default = {
             "schema_version": SCHEMA_VERSION,
             "files": [],
+            "whitelist_dirs": [],
         }
         data = read_json(self.paths.catalog_json, default)
         return self._migrate_catalog(data)
@@ -98,9 +114,11 @@ class ProjectStore:
 
     def _migrate_catalog(self, data: Any) -> Dict[str, Any]:
         if not isinstance(data, dict):
-            return {"schema_version": SCHEMA_VERSION, "files": []}
+            return {"schema_version": SCHEMA_VERSION, "files": [], "whitelist_dirs": []}
         if "files" not in data or not isinstance(data["files"], list):
             data["files"] = []
+        if "whitelist_dirs" not in data or not isinstance(data["whitelist_dirs"], list):
+            data["whitelist_dirs"] = []
         data["schema_version"] = str(data.get("schema_version", SCHEMA_VERSION))
         return data
 
