@@ -251,9 +251,14 @@ class CatalogService:
                 prev_entry["missing"] = True
                 files.append(prev_entry)
 
+        def _sort_key(item: Dict[str, Any]) -> tuple:
+            mtime = item.get("modified_time")
+            safe_mtime = int(mtime) if isinstance(mtime, (int, float, str)) and str(mtime).isdigit() else 0
+            return (-safe_mtime, item.get("filename", ""), item.get("abs_path", ""))
+
         out = {
             "schema_version": self.store.load_catalog().get("schema_version", "1.0"),
-            "files": sorted(files, key=lambda x: (x.get("filename", ""), x.get("abs_path", ""))),
+            "files": sorted(files, key=_sort_key),
             "scanned_at": int(time.time()),
             "whitelist_dirs": whitelist,
             "scan_errors": scan_errors,
