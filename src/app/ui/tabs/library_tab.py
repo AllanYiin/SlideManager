@@ -222,7 +222,7 @@ class LibraryTab(QWidget):
         def task(_progress_emit):
             return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10)
 
-        w = Worker(task, None)
+        w = Worker(task)
         w.args = (w.signals.progress.emit,)
         w.signals.progress.connect(self._on_scan_progress)
         w.signals.finished.connect(self._on_scan_done)
@@ -447,7 +447,7 @@ class LibraryTab(QWidget):
             self.ctx.catalog.scan()
             return self.ctx.indexer.compute_needed_files()
 
-        w = Worker(task, None)
+        w = Worker(task)
         w.signals.finished.connect(self._on_prepare_index_needed_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
