@@ -42,15 +42,25 @@ def _has_pdf2image() -> bool:
     return find_spec("pdf2image") is not None
 
 
+def _has_poppler() -> bool:
+    return bool(shutil.which("pdftoppm") or shutil.which("pdfinfo"))
+
+
 def _pdf_to_pngs(pdf_path: Path, out_dir: Path) -> List[Path]:
     from pdf2image import convert_from_path
+    from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError
 
-    paths = convert_from_path(
-        str(pdf_path),
-        output_folder=str(out_dir),
-        fmt="png",
-        paths_only=True,
-    )
+    try:
+        paths = convert_from_path(
+            str(pdf_path),
+            output_folder=str(out_dir),
+            fmt="png",
+            paths_only=True,
+        )
+    except PDFInfoNotInstalledError as exc:
+        raise RuntimeError("未偵測到 Poppler，請確認已安裝並加入 PATH") from exc
+    except PDFPageCountError as exc:
+        raise RuntimeError("無法取得 PDF 頁數，請確認 Poppler 是否安裝完整") from exc
     return [Path(p) for p in paths]
 
 
@@ -128,7 +138,12 @@ class LibreOfficeListenerRenderer:
         self._listener: Optional[LibreOfficeListener] = None
 
     def available(self) -> bool:
-        return bool(self._soffice) and find_spec("uno") is not None and _has_pdf2image()
+        return (
+            bool(self._soffice)
+            and find_spec("uno") is not None
+            and _has_pdf2image()
+            and _has_poppler()
+        )
 
     def status_message(self) -> str:
         if not self._soffice:
@@ -137,6 +152,8 @@ class LibreOfficeListenerRenderer:
             return "未安裝 UNO"
         if not _has_pdf2image():
             return "未安裝 pdf2image"
+        if not _has_poppler():
+            return "未安裝 Poppler（pdftoppm/pdfinfo）"
         return self._soffice
 
     def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
@@ -156,13 +173,15 @@ class LibreOfficeCliRenderer:
         self._soffice = shutil.which("soffice")
 
     def available(self) -> bool:
-        return bool(self._soffice) and _has_pdf2image()
+        return bool(self._soffice) and _has_pdf2image() and _has_poppler()
 
     def status_message(self) -> str:
         if not self._soffice:
             return "未偵測到 LibreOffice"
         if not _has_pdf2image():
             return "未安裝 pdf2image"
+        if not _has_poppler():
+            return "未安裝 Poppler（pdftoppm/pdfinfo）"
         return self._soffice
 
     def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
@@ -194,7 +213,12 @@ class WindowsComRenderer:
     name = "windows_com"
 
     def available(self) -> bool:
-        return os.name == "nt" and find_spec("win32com") is not None and _has_pdf2image()
+        return (
+            os.name == "nt"
+            and find_spec("win32com") is not None
+            and _has_pdf2image()
+            and _has_poppler()
+        )
 
     def status_message(self) -> str:
         if os.name != "nt":
@@ -203,6 +227,8 @@ class WindowsComRenderer:
             return "未安裝 pywin32"
         if not _has_pdf2image():
             return "未安裝 pdf2image"
+        if not _has_poppler():
+            return "未安裝 Poppler（pdftoppm/pdfinfo）"
         return "可用"
 
     def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
