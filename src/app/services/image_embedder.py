@@ -57,20 +57,24 @@ class ImageEmbedder:
             log.exception("[ONNX_ERROR] 圖片嵌入失敗 (bytes): %s", exc)
             return np.zeros((self.dim,), dtype=np.float16)
 
-    def embed_images(self, image_paths: List[Path]) -> np.ndarray:
+    def embed_images(self, image_paths: List[Path], *, batch_size: int = 16) -> np.ndarray:
         if not image_paths:
             return np.zeros((0, self.dim), dtype=np.float16)
 
         outputs: List[np.ndarray] = []
-        for path in image_paths:
+        safe_batch_size = max(1, int(batch_size))
+        for start in range(0, len(image_paths), safe_batch_size):
+            batch_paths = image_paths[start : start + safe_batch_size]
             try:
-                input_data = self._preprocess_image(path)
+                input_data = self._preprocess_images(batch_paths)
                 embedding = self._ort_session.run([self.output_name], {self.input_name: input_data})[0]
-                embedding = np.squeeze(embedding, axis=0).astype(np.float16)
+                embedding = np.asarray(embedding).astype(np.float16)
+                if embedding.ndim == 1:
+                    embedding = np.expand_dims(embedding, axis=0)
                 outputs.append(embedding)
             except Exception as exc:
-                log.exception("[ONNX_ERROR] 圖片嵌入失敗 (%s): %s", path, exc)
-                outputs.append(np.zeros((self.dim,), dtype=np.float16))
+                log.exception("[ONNX_ERROR] 圖片嵌入失敗 (%s): %s", batch_paths, exc)
+                outputs.append(np.zeros((len(batch_paths), self.dim), dtype=np.float16))
         return np.vstack(outputs)
 
     @staticmethod
@@ -99,6 +103,28 @@ class ImageEmbedder:
         img_np = (img_np - 127.5) / 127.5
         img_np = img_np.transpose(2, 0, 1)
         return np.expand_dims(img_np, axis=0)
+
+    @staticmethod
+    def _preprocess_images(img_paths: List[Path]) -> np.ndarray:
+        from PIL import Image
+
+        batch: List[np.ndarray] = []
+        for img_path in img_paths:
+            try:
+                with Image.open(img_path) as img:
+                    img = img.convert("RGB")
+                    if img.size != (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE):
+                        img = img.resize((MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+                    img_np = np.array(img).astype(np.float32)
+            except Exception as exc:
+                log.exception("[ONNX_ERROR] 讀取圖片失敗 (%s): %s", img_path, exc)
+                img_np = np.zeros((MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, 3), dtype=np.float32)
+            img_np = (img_np - 127.5) / 127.5
+            img_np = img_np.transpose(2, 0, 1)
+            batch.append(img_np)
+        if not batch:
+            return np.zeros((0, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE), dtype=np.float32)
+        return np.stack(batch, axis=0)
 
 
 @dataclass
@@ -163,7 +189,7 @@ class ImageEmbeddingService:
             return np.zeros((dim,), dtype=np.float32)
         return self._embedder.embed_image_bytes(image_bytes).astype(np.float32)
 
-    def embed_images(self, image_paths: List[Path], *, dim: int) -> np.ndarray:
+    def embed_images(self, image_paths: List[Path], *, dim: int, batch_size: int = 16) -> np.ndarray:
         if not self._embedder:
             return np.zeros((len(image_paths), dim), dtype=np.float32)
-        return self._embedder.embed_images(image_paths).astype(np.float32)
+        return self._embedder.embed_images(image_paths, batch_size=batch_size).astype(np.float32)
