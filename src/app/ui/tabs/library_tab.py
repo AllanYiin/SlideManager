@@ -352,6 +352,15 @@ class LibraryTab(QWidget):
         except Exception:
             render_status = None
         if render_status and not render_status.get("available", False):
+            status_map = render_status.get("status") or {}
+            status_lines = []
+            libreoffice_status = status_map.get("libreoffice")
+            windows_status = status_map.get("windows_com")
+            if libreoffice_status:
+                status_lines.append(f"LibreOffice：{libreoffice_status}")
+            if windows_status:
+                status_lines.append(f"PowerPoint（Windows COM）：{windows_status}")
+            status_detail = "\n".join(status_lines)
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle("未偵測到可用的 renderer")
@@ -363,6 +372,8 @@ class LibraryTab(QWidget):
                 "Renderer 是系統層級的投影片軟體，無法透過 requirements.txt 安裝。"
                 "請先安裝 LibreOffice 或 PowerPoint 後再重試。要繼續索引嗎？"
             )
+            if status_detail:
+                box.setDetailedText(status_detail)
             box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
             box.setDefaultButton(QMessageBox.Ok)
             box.setTextInteractionFlags(Qt.TextSelectableByMouse)
