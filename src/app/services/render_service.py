@@ -212,6 +212,11 @@ class LibreOfficeCliRenderer:
 class WindowsComRenderer:
     name = "windows_com"
 
+    def __init__(self) -> None:
+        self._powerpoint = None
+        self._use_constants = False
+        self._batching = False
+
     def available(self) -> bool:
         return (
             os.name == "nt"
@@ -228,21 +233,46 @@ class WindowsComRenderer:
             return "未安裝 PyMuPDF"
         return "可用"
 
-    def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
+    def begin_batch(self) -> None:
         if os.name != "nt":
-            return []
+            return
+        self._batching = True
+        self._ensure_powerpoint()
+
+    def end_batch(self) -> None:
+        self._batching = False
+        self._quit_powerpoint()
+
+    def _ensure_powerpoint(self) -> None:
+        if self._powerpoint is not None:
+            return
         import win32com.client  # type: ignore
         from win32com.client import gencache  # type: ignore
 
-        pdf_path = out_dir / f"{pptx_path.stem}.pdf"
         try:
-            powerpoint = gencache.EnsureDispatch("PowerPoint.Application")
-            use_constants = True
+            self._powerpoint = gencache.EnsureDispatch("PowerPoint.Application")
+            self._use_constants = True
         except Exception:
-            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
-            use_constants = False
+            self._powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            self._use_constants = False
+        self._powerpoint.Visible = 1
 
-        powerpoint.Visible = 1
+    def _quit_powerpoint(self) -> None:
+        if self._powerpoint is None:
+            return
+        try:
+            self._powerpoint.Quit()
+        finally:
+            self._powerpoint = None
+
+    def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
+        if os.name != "nt":
+            return []
+
+        pdf_path = out_dir / f"{pptx_path.stem}.pdf"
+        self._ensure_powerpoint()
+        powerpoint = self._powerpoint
+        use_constants = self._use_constants
         try:
             presentation = powerpoint.Presentations.Open(str(pptx_path), WithWindow=False)
             try:
@@ -263,7 +293,8 @@ class WindowsComRenderer:
             finally:
                 presentation.Close()
         finally:
-            powerpoint.Quit()
+            if not self._batching:
+                self._quit_powerpoint()
         return sorted(_pdf_to_pngs(pdf_path, out_dir))
 
 
@@ -309,6 +340,22 @@ class RenderService:
         except Exception as e:
             log.warning("[RENDERER_ERROR] Renderer 失敗（%s）：%s", renderer.name, e)
             return RenderResult(ok=False, thumbs=[], message=f"{renderer.name} 渲染失敗，已改為純文字索引")
+
+    def begin_batch(self) -> None:
+        available = [r for r in self._renderers if r.available()]
+        if not available:
+            return
+        renderer = available[0]
+        if hasattr(renderer, "begin_batch"):
+            renderer.begin_batch()
+
+    def end_batch(self) -> None:
+        available = [r for r in self._renderers if r.available()]
+        if not available:
+            return
+        renderer = available[0]
+        if hasattr(renderer, "end_batch"):
+            renderer.end_batch()
 
     def _thumb_path(self, file_hash: str, page: int) -> Path:
         return self.thumbs_dir / f"{file_hash}_p{page:04d}.png"

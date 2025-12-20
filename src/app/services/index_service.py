@@ -167,108 +167,114 @@ class IndexService:
         overall_total = total_files * 2 + stage2_units
         render_message = ""
         staged_files: List[FileStageData] = []
-        for fi, f in enumerate(files, start=1):
-            if cancel_flag and cancel_flag():
-                return 1, "已取消"
-            if not wait_if_paused(fi, overall_total):
-                return 1, "已取消"
+        if update_image:
+            self.renderer.begin_batch()
+        try:
+            for fi, f in enumerate(files, start=1):
+                if cancel_flag and cancel_flag():
+                    return 1, "已取消"
+                if not wait_if_paused(fi, overall_total):
+                    return 1, "已取消"
 
-            abs_path = f.get("abs_path")
-            file_hash = f.get("file_hash")
-            if not abs_path or not file_hash:
-                continue
+                abs_path = f.get("abs_path")
+                file_hash = f.get("file_hash")
+                if not abs_path or not file_hash:
+                    continue
 
-            pptx = Path(abs_path)
-            if not pptx.exists():
-                message = format_user_message(ErrorCode.PATH_NOT_FOUND, detail=str(pptx))
-                log.warning("[PATH_NOT_FOUND] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.PATH_NOT_FOUND.value, message)
-                progress("skip", fi, overall_total, "檔案已移除，已略過")
-                continue
-            try:
-                start_stat = pptx.stat()
-                start_mtime = int(start_stat.st_mtime)
-                start_size = int(start_stat.st_size)
-            except PermissionError as exc:
-                message = format_user_message(ErrorCode.PERMISSION_DENIED, detail=str(exc))
-                log.warning("[PERMISSION_DENIED] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.PERMISSION_DENIED.value, message)
-                progress("skip", fi, overall_total, "檔案權限不足，已略過")
-                continue
-            except Exception as exc:
-                log.warning("讀取檔案狀態失敗：%s (%s)", pptx, exc)
-                continue
+                pptx = Path(abs_path)
+                if not pptx.exists():
+                    message = format_user_message(ErrorCode.PATH_NOT_FOUND, detail=str(pptx))
+                    log.warning("[PATH_NOT_FOUND] %s", message)
+                    self.catalog.mark_index_error(abs_path, ErrorCode.PATH_NOT_FOUND.value, message)
+                    progress("skip", fi, overall_total, "檔案已移除，已略過")
+                    continue
+                try:
+                    start_stat = pptx.stat()
+                    start_mtime = int(start_stat.st_mtime)
+                    start_size = int(start_stat.st_size)
+                except PermissionError as exc:
+                    message = format_user_message(ErrorCode.PERMISSION_DENIED, detail=str(exc))
+                    log.warning("[PERMISSION_DENIED] %s", message)
+                    self.catalog.mark_index_error(abs_path, ErrorCode.PERMISSION_DENIED.value, message)
+                    progress("skip", fi, overall_total, "檔案權限不足，已略過")
+                    continue
+                except Exception as exc:
+                    log.warning("讀取檔案狀態失敗：%s (%s)", pptx, exc)
+                    continue
 
-            if int(f.get("modified_time") or -1) != start_mtime or int(f.get("size") or -1) != start_size:
-                message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
-                log.warning("[MTIME_CHANGED] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
-                progress("skip", fi, overall_total, "檔案已變更，請重新掃描")
-                continue
+                if int(f.get("modified_time") or -1) != start_mtime or int(f.get("size") or -1) != start_size:
+                    message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
+                    log.warning("[MTIME_CHANGED] %s", message)
+                    self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
+                    progress("skip", fi, overall_total, "檔案已變更，請重新掃描")
+                    continue
 
-            slide_count = int(f.get("slide_count") or 0)
+                slide_count = int(f.get("slide_count") or 0)
 
-            if update_text:
-                progress("extract", fi, overall_total, f"抽取文字：{pptx.name}")
-                slide_texts = self.extractor.extract(pptx)
-            else:
-                slide_texts = []
+                if update_text:
+                    progress("extract", fi, overall_total, f"抽取文字：{pptx.name}")
+                    slide_texts = self.extractor.extract(pptx)
+                else:
+                    slide_texts = []
 
-            if cancel_flag and cancel_flag():
-                return 1, "已取消"
-            if not wait_if_paused(fi, overall_total):
-                return 1, "已取消"
+                if cancel_flag and cancel_flag():
+                    return 1, "已取消"
+                if not wait_if_paused(fi, overall_total):
+                    return 1, "已取消"
 
-            if update_image:
-                progress("render", fi, overall_total, f"產生縮圖：{pptx.name}")
-                rr = self.renderer.render_pptx(pptx, file_hash, slides_count=slide_count or len(slide_texts))
-                render_message = rr.message
-                thumbs = rr.thumbs
-                if not rr.ok:
-                    log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
-                    progress("render", fi, overall_total, rr.message)
-            else:
-                thumbs = []
+                if update_image:
+                    progress("render", fi, overall_total, f"產生縮圖：{pptx.name}")
+                    rr = self.renderer.render_pptx(pptx, file_hash, slides_count=slide_count or len(slide_texts))
+                    render_message = rr.message
+                    thumbs = rr.thumbs
+                    if not rr.ok:
+                        log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
+                        progress("render", fi, overall_total, rr.message)
+                else:
+                    thumbs = []
 
-            if cancel_flag and cancel_flag():
-                return 1, "已取消"
-            if not wait_if_paused(fi, overall_total):
-                return 1, "已取消"
+                if cancel_flag and cancel_flag():
+                    return 1, "已取消"
+                if not wait_if_paused(fi, overall_total):
+                    return 1, "已取消"
 
-            source_slide_count = len(slide_texts) if slide_texts else slide_count
-            slide_count = max(slide_count, source_slide_count)
-            file_slides: List[SlideWork] = []
-            if update_text and slide_texts:
-                slide_iter = enumerate(slide_texts, start=1)
-            else:
-                slide_iter = ((si, None) for si in range(1, slide_count + 1))
-            for si, st in slide_iter:
-                thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None
-                file_slides.append(
-                    SlideWork(
+                source_slide_count = len(slide_texts) if slide_texts else slide_count
+                slide_count = max(slide_count, source_slide_count)
+                file_slides: List[SlideWork] = []
+                if update_text and slide_texts:
+                    slide_iter = enumerate(slide_texts, start=1)
+                else:
+                    slide_iter = ((si, None) for si in range(1, slide_count + 1))
+                for si, st in slide_iter:
+                    thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None
+                    file_slides.append(
+                        SlideWork(
+                            file_entry=f,
+                            abs_path=abs_path,
+                            file_hash=file_hash,
+                            filename=pptx.name,
+                            page=si,
+                            slide_text=st,
+                            thumb_path=thumb_path,
+                        )
+                    )
+                staged_files.append(
+                    FileStageData(
                         file_entry=f,
                         abs_path=abs_path,
                         file_hash=file_hash,
-                        filename=pptx.name,
-                        page=si,
-                        slide_text=st,
-                        thumb_path=thumb_path,
+                        pptx=pptx,
+                        slide_texts=slide_texts,
+                        thumbs=thumbs,
+                        slide_count=slide_count,
+                        start_mtime=start_mtime,
+                        start_size=start_size,
+                        slides=file_slides,
                     )
                 )
-            staged_files.append(
-                FileStageData(
-                    file_entry=f,
-                    abs_path=abs_path,
-                    file_hash=file_hash,
-                    pptx=pptx,
-                    slide_texts=slide_texts,
-                    thumbs=thumbs,
-                    slide_count=slide_count,
-                    start_mtime=start_mtime,
-                    start_size=start_size,
-                    slides=file_slides,
-                )
-            )
+        finally:
+            if update_image:
+                self.renderer.end_batch()
 
         if cancel_flag and cancel_flag():
             return 1, "已取消"
