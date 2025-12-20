@@ -6,7 +6,7 @@ import hashlib
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 from app.core.logging import get_logger
 from app.services.project_store import ProjectStore
@@ -98,7 +98,12 @@ class CatalogService:
     def set_whitelist_enabled(self, dir_path: str, enabled: bool) -> List[Dict[str, Any]]:
         return self.update_whitelist_dir(dir_path, enabled=enabled)
 
-    def scan(self) -> Dict[str, Any]:
+    def scan(
+        self,
+        *,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        progress_every: int = 10,
+    ) -> Dict[str, Any]:
         """掃描白名單目錄，更新 catalog.json。"""
         whitelist = self._load_whitelist()
         existing = self.store.load_catalog().get("files", [])
@@ -107,6 +112,8 @@ class CatalogService:
         scan_errors: List[Dict[str, Any]] = []
 
         files: List[Dict[str, Any]] = []
+        batch: List[Dict[str, Any]] = []
+        scanned_count = 0
         for entry in whitelist:
             if not entry.get("enabled", True):
                 continue
@@ -192,6 +199,17 @@ class CatalogService:
                             "missing": False,
                         }
                         files.append(entry)
+                        if on_progress:
+                            scanned_count += 1
+                            batch.append(entry)
+                            if progress_every > 0 and len(batch) >= progress_every:
+                                on_progress(
+                                    {
+                                        "count": scanned_count,
+                                        "batch": list(batch),
+                                    }
+                                )
+                                batch.clear()
                     except PermissionError as e:
                         scan_errors.append(
                             {
@@ -212,6 +230,14 @@ class CatalogService:
                     }
                 )
                 log.warning("[PERMISSION_DENIED] 讀取目錄失敗：%s (%s)", root, e)
+
+        if on_progress and batch:
+            on_progress(
+                {
+                    "count": scanned_count,
+                    "batch": list(batch),
+                }
+            )
 
         # 標記 missing
         for prev in existing:

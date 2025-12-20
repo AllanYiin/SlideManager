@@ -42,6 +42,8 @@ class LibraryTab(QWidget):
         self._pause_index = False
         self._last_action = None
         self._last_action_label = ""
+        self._scan_files_cache: List[Dict[str, Any]] = []
+        self._scan_count = 0
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -205,19 +207,39 @@ class LibraryTab(QWidget):
         self._set_last_action("掃描檔案", self.scan_files)
         self.prog_label.setText("掃描中...")
         self.prog.setRange(0, 0)
+        self._scan_files_cache = []
+        self._scan_count = 0
 
-        def task():
-            return self.ctx.catalog.scan()
+        def task(_progress_emit):
+            return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10)
 
-        w = Worker(task)
+        w = Worker(task, None)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_scan_progress)
         w.signals.finished.connect(self._on_scan_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
+
+    def _on_scan_progress(self, payload: object) -> None:
+        try:
+            if not isinstance(payload, dict):
+                return
+            batch = payload.get("batch", [])
+            count = int(payload.get("count", 0))
+            if isinstance(batch, list) and batch:
+                self._scan_files_cache.extend(batch)
+            self._scan_count = count
+            self.prog_label.setText(f"掃描中... 已掃描 {self._scan_count} 筆")
+            self._refresh_table_with_files(self._scan_files_cache)
+        except Exception:
+            pass
 
     def _on_scan_done(self, _result: object) -> None:
         self.prog.setRange(0, 100)
         self.prog.setValue(0)
         self.prog_label.setText("掃描完成")
+        self._scan_files_cache = []
+        self._scan_count = 0
         self.refresh_table()
         self.refresh_dirs()
         cat = self.ctx.store.load_catalog() if self.ctx else {}
@@ -256,6 +278,9 @@ class LibraryTab(QWidget):
             return
         cat = self.ctx.store.load_catalog()
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+        self._refresh_table_with_files(files)
+
+    def _refresh_table_with_files(self, files: List[Dict[str, Any]]) -> None:
         kw = (self.filter_edit.text() or "").strip().lower()
         if kw:
             files = [f for f in files if kw in (f.get("filename", "").lower())]
