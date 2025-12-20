@@ -6,7 +6,7 @@ import hashlib
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 from app.core.logging import get_logger
 from app.services.project_store import ProjectStore
@@ -98,7 +98,12 @@ class CatalogService:
     def set_whitelist_enabled(self, dir_path: str, enabled: bool) -> List[Dict[str, Any]]:
         return self.update_whitelist_dir(dir_path, enabled=enabled)
 
-    def scan(self) -> Dict[str, Any]:
+    def scan(
+        self,
+        *,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        progress_every: int = 10,
+    ) -> Dict[str, Any]:
         """掃描白名單目錄，更新 catalog.json。"""
         whitelist = self._load_whitelist()
         existing = self.store.load_catalog().get("files", [])
@@ -107,6 +112,8 @@ class CatalogService:
         scan_errors: List[Dict[str, Any]] = []
 
         files: List[Dict[str, Any]] = []
+        batch: List[Dict[str, Any]] = []
+        scanned_count = 0
         for entry in whitelist:
             if not entry.get("enabled", True):
                 continue
@@ -192,6 +199,17 @@ class CatalogService:
                             "missing": False,
                         }
                         files.append(entry)
+                        if on_progress:
+                            scanned_count += 1
+                            batch.append(entry)
+                            if progress_every > 0 and len(batch) >= progress_every:
+                                on_progress(
+                                    {
+                                        "count": scanned_count,
+                                        "batch": list(batch),
+                                    }
+                                )
+                                batch.clear()
                     except PermissionError as e:
                         scan_errors.append(
                             {
@@ -213,6 +231,14 @@ class CatalogService:
                 )
                 log.warning("[PERMISSION_DENIED] 讀取目錄失敗：%s (%s)", root, e)
 
+        if on_progress and batch:
+            on_progress(
+                {
+                    "count": scanned_count,
+                    "batch": list(batch),
+                }
+            )
+
         # 標記 missing
         for prev in existing:
             if not isinstance(prev, dict):
@@ -233,7 +259,14 @@ class CatalogService:
         self.store.save_catalog(out)
         return out
 
-    def mark_indexed(self, abs_path: str, slides_count: int) -> None:
+    def mark_indexed(
+        self,
+        abs_path: str,
+        slides_count: int,
+        *,
+        text_indexed_count: Optional[int] = None,
+        image_indexed_count: Optional[int] = None,
+    ) -> None:
         cat = self.store.load_catalog()
         files = cat.get("files", [])
         now = int(time.time())
@@ -243,11 +276,38 @@ class CatalogService:
                 e["indexed_at"] = now
                 e["slides_count"] = int(slides_count)
                 mtime = e.get("modified_time")
+                prev_status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
+                text_count = (
+                    int(text_indexed_count)
+                    if text_indexed_count is not None
+                    else prev_status.get("text_indexed_count")
+                )
+                image_count = (
+                    int(image_indexed_count)
+                    if image_indexed_count is not None
+                    else prev_status.get("image_indexed_count")
+                )
+                if isinstance(text_count, bool):
+                    text_count = None
+                if isinstance(image_count, bool):
+                    image_count = None
                 e["index_status"] = {
                     "indexed": True,
                     "indexed_epoch": now,
                     "index_mtime_epoch": int(mtime) if mtime is not None else None,
                     "index_slide_count": int(slides_count),
+                    "text_indexed_count": text_count,
+                    "image_indexed_count": image_count,
+                    "text_indexed": (
+                        text_count >= int(slides_count)
+                        if isinstance(text_count, int)
+                        else prev_status.get("text_indexed", None)
+                    ),
+                    "image_indexed": (
+                        image_count >= int(slides_count)
+                        if isinstance(image_count, int)
+                        else prev_status.get("image_indexed", None)
+                    ),
                     "last_error": None,
                 }
         cat["files"] = files
@@ -266,6 +326,10 @@ class CatalogService:
                     "indexed_epoch": None,
                     "index_mtime_epoch": None,
                     "index_slide_count": 0,
+                    "text_indexed_count": 0,
+                    "image_indexed_count": 0,
+                    "text_indexed": False,
+                    "image_indexed": False,
                     "last_error": None,
                 }
         cat["files"] = files
@@ -287,6 +351,10 @@ class CatalogService:
                         "indexed_epoch": None,
                         "index_mtime_epoch": None,
                         "index_slide_count": 0,
+                        "text_indexed_count": 0,
+                        "image_indexed_count": 0,
+                        "text_indexed": False,
+                        "image_indexed": False,
                         "last_error": {"code": code, "message": message, "time": now},
                     }
                 )

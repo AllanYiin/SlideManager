@@ -42,6 +42,8 @@ class LibraryTab(QWidget):
         self._pause_index = False
         self._last_action = None
         self._last_action_label = ""
+        self._scan_files_cache: List[Dict[str, Any]] = []
+        self._scan_count = 0
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -205,19 +207,39 @@ class LibraryTab(QWidget):
         self._set_last_action("掃描檔案", self.scan_files)
         self.prog_label.setText("掃描中...")
         self.prog.setRange(0, 0)
+        self._scan_files_cache = []
+        self._scan_count = 0
 
-        def task():
-            return self.ctx.catalog.scan()
+        def task(_progress_emit):
+            return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10)
 
-        w = Worker(task)
+        w = Worker(task, None)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_scan_progress)
         w.signals.finished.connect(self._on_scan_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
+
+    def _on_scan_progress(self, payload: object) -> None:
+        try:
+            if not isinstance(payload, dict):
+                return
+            batch = payload.get("batch", [])
+            count = int(payload.get("count", 0))
+            if isinstance(batch, list) and batch:
+                self._scan_files_cache.extend(batch)
+            self._scan_count = count
+            self.prog_label.setText(f"掃描中... 已掃描 {self._scan_count} 筆")
+            self._refresh_table_with_files(self._scan_files_cache)
+        except Exception:
+            pass
 
     def _on_scan_done(self, _result: object) -> None:
         self.prog.setRange(0, 100)
         self.prog.setValue(0)
         self.prog_label.setText("掃描完成")
+        self._scan_files_cache = []
+        self._scan_count = 0
         self.refresh_table()
         self.refresh_dirs()
         cat = self.ctx.store.load_catalog() if self.ctx else {}
@@ -256,6 +278,9 @@ class LibraryTab(QWidget):
             return
         cat = self.ctx.store.load_catalog()
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+        self._refresh_table_with_files(files)
+
+    def _refresh_table_with_files(self, files: List[Dict[str, Any]]) -> None:
         kw = (self.filter_edit.text() or "").strip().lower()
         if kw:
             files = [f for f in files if kw in (f.get("filename", "").lower())]
@@ -306,6 +331,15 @@ class LibraryTab(QWidget):
                     return "需要索引"
             except Exception:
                 return "需要索引"
+        if status:
+            text_indexed = status.get("text_indexed")
+            image_indexed = status.get("image_indexed")
+            if text_indexed is False and image_indexed is False:
+                return "文字/圖像缺失"
+            if text_indexed is False:
+                return "缺文字索引"
+            if image_indexed is False:
+                return "缺圖像索引"
         return "已索引"
 
     def selected_files(self) -> List[Dict[str, Any]]:
@@ -323,6 +357,27 @@ class LibraryTab(QWidget):
         return selected
 
     # ---------- indexing ----------
+    def _choose_index_mode(self) -> tuple[bool, bool] | None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("選擇索引類型")
+        box.setText("請選擇要更新的索引類型：")
+        btn_full = box.addButton("完整索引（文字 + 圖像）", QMessageBox.AcceptRole)
+        btn_text = box.addButton("只更新文字索引", QMessageBox.AcceptRole)
+        btn_image = box.addButton("只更新圖像索引", QMessageBox.AcceptRole)
+        btn_cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(btn_full)
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_cancel:
+            return None
+        if clicked == btn_text:
+            return True, False
+        if clicked == btn_image:
+            return False, True
+        return True, True
+
     def start_index_needed(self) -> None:
         if not self.ctx:
             return
@@ -331,8 +386,12 @@ class LibraryTab(QWidget):
         if not files:
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
             return
-        self._set_last_action("開始索引（需要者）", lambda: self._start_index(files))
-        self._start_index(files)
+        mode = self._choose_index_mode()
+        if not mode:
+            return
+        update_text, update_image = mode
+        self._set_last_action("開始索引（需要者）", lambda: self._start_index(files, update_text, update_image))
+        self._start_index(files, update_text, update_image)
 
     def start_index_selected(self) -> None:
         if not self.ctx:
@@ -342,8 +401,13 @@ class LibraryTab(QWidget):
         if not files:
             QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
             return
-        self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files))
-        self._start_index(files)
+        mode = self._choose_index_mode()
+        if not mode:
+            return
+        update_text, update_image = mode
+        self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files, update_text, update_image))
+        self._start_index(files, update_text, update_image)
+
 
     def _start_index(self, files: List[Dict[str, Any]]):
         render_status = None
@@ -380,6 +444,7 @@ class LibraryTab(QWidget):
             if box.exec() != QMessageBox.Ok:
                 return
 
+
         self._cancel_index = False
         self._pause_index = False
         self.btn_cancel.setEnabled(True)
@@ -407,6 +472,8 @@ class LibraryTab(QWidget):
                 on_progress=progress_hook,
                 cancel_flag=cancelled,
                 pause_flag=paused,
+                update_text=update_text,
+                update_image=update_image,
             )
 
         w = Worker(task, None)
