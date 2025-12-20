@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -131,86 +132,141 @@ class IndexService:
                 prev_entries[(file_path, page)] = s
         slides = [s for s in slides if s.get("file_path") not in target_paths]
 
+        def wait_future(future: Any, cur: int, total: int) -> bool:
+            while not future.done():
+                if cancel_flag and cancel_flag():
+                    return False
+                if not wait_if_paused(cur, total):
+                    return False
+                time.sleep(0.05)
+            return True
+
         total_files = len(files)
         render_message = ""
-        for fi, f in enumerate(files, start=1):
-            if cancel_flag and cancel_flag():
-                return 1, "已取消"
-            if not wait_if_paused(fi, total_files):
-                return 1, "已取消"
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            for fi, f in enumerate(files, start=1):
+                if cancel_flag and cancel_flag():
+                    return 1, "已取消"
+                if not wait_if_paused(fi, total_files):
+                    return 1, "已取消"
 
-            abs_path = f.get("abs_path")
-            file_hash = f.get("file_hash")
-            if not abs_path or not file_hash:
-                continue
+                abs_path = f.get("abs_path")
+                file_hash = f.get("file_hash")
+                if not abs_path or not file_hash:
+                    continue
 
-            pptx = Path(abs_path)
-            if not pptx.exists():
-                message = format_user_message(ErrorCode.PATH_NOT_FOUND, detail=str(pptx))
-                log.warning("[PATH_NOT_FOUND] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.PATH_NOT_FOUND.value, message)
-                progress("skip", fi, total_files, "檔案已移除，已略過")
-                continue
-            try:
-                start_stat = pptx.stat()
-                start_mtime = int(start_stat.st_mtime)
-                start_size = int(start_stat.st_size)
-            except PermissionError as exc:
-                message = format_user_message(ErrorCode.PERMISSION_DENIED, detail=str(exc))
-                log.warning("[PERMISSION_DENIED] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.PERMISSION_DENIED.value, message)
-                progress("skip", fi, total_files, "檔案權限不足，已略過")
-                continue
-            except Exception as exc:
-                log.warning("讀取檔案狀態失敗：%s (%s)", pptx, exc)
-                continue
+                pptx = Path(abs_path)
+                if not pptx.exists():
+                    message = format_user_message(ErrorCode.PATH_NOT_FOUND, detail=str(pptx))
+                    log.warning("[PATH_NOT_FOUND] %s", message)
+                    self.catalog.mark_index_error(abs_path, ErrorCode.PATH_NOT_FOUND.value, message)
+                    progress("skip", fi, total_files, "檔案已移除，已略過")
+                    continue
+                try:
+                    start_stat = pptx.stat()
+                    start_mtime = int(start_stat.st_mtime)
+                    start_size = int(start_stat.st_size)
+                except PermissionError as exc:
+                    message = format_user_message(ErrorCode.PERMISSION_DENIED, detail=str(exc))
+                    log.warning("[PERMISSION_DENIED] %s", message)
+                    self.catalog.mark_index_error(abs_path, ErrorCode.PERMISSION_DENIED.value, message)
+                    progress("skip", fi, total_files, "檔案權限不足，已略過")
+                    continue
+                except Exception as exc:
+                    log.warning("讀取檔案狀態失敗：%s (%s)", pptx, exc)
+                    continue
 
-            if int(f.get("modified_time") or -1) != start_mtime or int(f.get("size") or -1) != start_size:
-                message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
-                log.warning("[MTIME_CHANGED] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
-                progress("skip", fi, total_files, "檔案已變更，請重新掃描")
-                continue
+                if int(f.get("modified_time") or -1) != start_mtime or int(f.get("size") or -1) != start_size:
+                    message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
+                    log.warning("[MTIME_CHANGED] %s", message)
+                    self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
+                    progress("skip", fi, total_files, "檔案已變更，請重新掃描")
+                    continue
 
-            slide_count = int(f.get("slide_count") or 0)
+                slide_count = int(f.get("slide_count") or 0)
 
-            if update_text:
-                progress("extract", fi, total_files, f"抽取文字：{pptx.name}")
-                slide_texts = self.extractor.extract(pptx)
-            else:
-                slide_texts = []
+                def run_text_pipeline() -> Tuple[List[Any], List[List[float]]]:
+                    if not update_text:
+                        return [], []
+                    progress("extract", fi, total_files, f"抽取文字：{pptx.name}")
+                    slide_texts_local = self.extractor.extract(pptx)
+                    if update_text and self.embeddings.has_openai():
+                        progress("embed", fi, total_files, f"產生向量：{pptx.name}")
+                        all_texts = [st.all_text for st in slide_texts_local]
+                        text_vecs_local = self.embeddings.embed_text_batch(all_texts)
+                        return slide_texts_local, text_vecs_local
+                    if update_text:
+                        progress("embed", fi, total_files, f"未設定 API Key，略過向量：{pptx.name}")
+                    return slide_texts_local, []
 
-            if cancel_flag and cancel_flag():
-                return 1, "已取消"
-            if not wait_if_paused(fi, total_files):
-                return 1, "已取消"
+                def run_render_pipeline() -> Any:
+                    if not update_image:
+                        return None
+                    progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
+                    return self.renderer.render_pptx(
+                        pptx, file_hash, slides_count=slide_count
+                    )
 
-            if update_image:
-                progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
-                rr = self.renderer.render_pptx(pptx, file_hash, slides_count=slide_count or len(slide_texts))
-                render_message = rr.message
-                thumbs = rr.thumbs
-                if not rr.ok:
-                    log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
-                    progress("render", fi, total_files, rr.message)
-            else:
-                thumbs = []
+                def run_image_pipeline(thumb_paths: List[Path]) -> List[Optional[str]]:
+                    if not update_image or not thumb_paths:
+                        return []
+                    progress("image_embed", fi, total_files, f"圖像向量：{pptx.name}")
+                    outputs: List[Optional[str]] = []
+                    for thumb_path in thumb_paths:
+                        img_vec_b64 = None
+                        try:
+                            b = Path(thumb_path).read_bytes()
+                            if b:
+                                img_vec = self.image_embedder.embed_image_bytes(b, dim=self.emb_cfg.image_dim)
+                                img_vec_b64 = vec_to_b64_f32(img_vec)
+                        except Exception as exc:
+                            log.warning("圖像向量失敗：%s (%s)", thumb_path, exc)
+                            img_vec_b64 = None
+                        outputs.append(img_vec_b64)
+                    return outputs
 
-            if cancel_flag and cancel_flag():
-                return 1, "已取消"
-            if not wait_if_paused(fi, total_files):
-                return 1, "已取消"
+                text_future = executor.submit(run_text_pipeline) if update_text else None
+                render_future = executor.submit(run_render_pipeline) if update_image else None
 
-            if update_text and self.embeddings.has_openai():
-                progress("embed", fi, total_files, f"產生向量：{pptx.name}")
-                # text embeddings（分批）
-                all_texts = [st.all_text for st in slide_texts]
-                text_vecs = self.embeddings.embed_text_batch(all_texts)
-            elif update_text:
-                progress("embed", fi, total_files, f"未設定 API Key，略過向量：{pptx.name}")
-                text_vecs = []
-            else:
-                text_vecs = []
+                slide_texts: List[Any] = []
+                text_vecs: List[List[float]] = []
+                thumbs: List[Path] = []
+                image_vecs: List[Optional[str]] = []
+
+                if render_future:
+                    if not wait_future(render_future, fi, total_files):
+                        return 1, "已取消"
+                    try:
+                        rr = render_future.result()
+                    except Exception as exc:
+                        log.exception("縮圖產生失敗：%s", exc)
+                        rr = None
+                    if rr is not None:
+                        render_message = rr.message
+                        thumbs = rr.thumbs
+                        if not rr.ok:
+                            log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
+                            progress("render", fi, total_files, rr.message)
+
+                image_future = executor.submit(run_image_pipeline, thumbs) if update_image else None
+
+                if text_future:
+                    if not wait_future(text_future, fi, total_files):
+                        return 1, "已取消"
+                    try:
+                        slide_texts, text_vecs = text_future.result()
+                    except Exception as exc:
+                        log.exception("文字向量失敗：%s", exc)
+                        slide_texts, text_vecs = [], []
+
+                if image_future:
+                    if not wait_future(image_future, fi, total_files):
+                        return 1, "已取消"
+                    try:
+                        image_vecs = image_future.result()
+                    except Exception as exc:
+                        log.exception("圖像向量失敗：%s", exc)
+                        image_vecs = []
 
             new_entries = []
             source_slide_count = len(slide_texts) if slide_texts else slide_count
@@ -240,16 +296,8 @@ class IndexService:
 
                 thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None
                 img_vec_b64 = None
-
-                # 若縮圖存在且非空，做 image embedding（可退化）
-                if update_image and thumb_path:
-                    try:
-                        b = Path(thumb_path).read_bytes()
-                        if b:
-                            img_vec = self.image_embedder.embed_image_bytes(b, dim=self.emb_cfg.image_dim)
-                            img_vec_b64 = vec_to_b64_f32(img_vec)
-                    except Exception:
-                        img_vec_b64 = None
+                if update_image and image_vecs and si - 1 < len(image_vecs):
+                    img_vec_b64 = image_vecs[si - 1]
 
                 tv = None
                 if update_text and text_vecs and si - 1 < len(text_vecs):
