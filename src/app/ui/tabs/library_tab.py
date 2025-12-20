@@ -9,8 +9,10 @@ from typing import Any, Dict, List
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -23,7 +25,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QFileDialog,
 )
 
 from app.core.logging import get_logger
@@ -101,7 +102,14 @@ class LibraryTab(QWidget):
         self.table.setHorizontalHeaderLabels(["檔名", "路徑", "修改時間", "大小", "狀態", "投影片數"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setTextElideMode(Qt.ElideMiddle)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         right_layout.addWidget(self.table)
 
         prog_row = QHBoxLayout()
@@ -288,7 +296,6 @@ class LibraryTab(QWidget):
         self.table.setRowCount(len(files))
         for r, f in enumerate(files):
             self._set_row(r, f)
-        self.table.resizeColumnsToContents()
 
     def _set_row(self, r: int, f: Dict[str, Any]) -> None:
         fn = f.get("filename", "")
@@ -305,9 +312,20 @@ class LibraryTab(QWidget):
         slides = f.get("slide_count")
         slides_s = str(slides) if slides is not None else "-"
 
+        tooltip = "\n".join(
+            [
+                f"檔名：{fn}",
+                f"路徑：{path}",
+                f"修改時間：{mtime_s or '-'}",
+                f"大小：{size_s or '-'}",
+                f"狀態：{status or '-'}",
+                f"投影片數：{slides_s}",
+            ]
+        )
         for c, val in enumerate([fn, path, mtime_s, size_s, status, slides_s]):
             it = QTableWidgetItem(str(val))
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
+            it.setToolTip(tooltip)
             self.table.setItem(r, c, it)
 
     def _status_text(self, f: Dict[str, Any]) -> str:
