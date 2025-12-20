@@ -209,16 +209,34 @@ class WindowsComRenderer:
         if os.name != "nt":
             return []
         import win32com.client  # type: ignore
+        from win32com.client import gencache  # type: ignore
 
-        powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+        pdf_path = out_dir / f"{pptx_path.stem}.pdf"
+        try:
+            powerpoint = gencache.EnsureDispatch("PowerPoint.Application")
+            use_constants = True
+        except Exception:
+            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            use_constants = False
+
         powerpoint.Visible = 1
         try:
             presentation = powerpoint.Presentations.Open(str(pptx_path), WithWindow=False)
             try:
                 from win32com.client import constants  # type: ignore
 
-                pdf_path = out_dir / f"{pptx_path.stem}.pdf"
-                presentation.ExportAsFixedFormat(str(pdf_path), constants.ppFixedFormatTypePDF)
+                fixed_format_type = (
+                    getattr(constants, "ppFixedFormatTypePDF", 2) if use_constants else 2
+                )
+                fixed_format_intent = (
+                    getattr(constants, "ppFixedFormatIntentScreen", 1) if use_constants else 1
+                )
+                presentation.ExportAsFixedFormat(
+                    str(pdf_path),
+                    fixed_format_type,
+                    Intent=fixed_format_intent,
+                    PrintRange=None,
+                )
             finally:
                 presentation.Close()
         finally:
