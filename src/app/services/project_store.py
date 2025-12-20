@@ -127,10 +127,10 @@ class ProjectStore:
         default = {
             "schema_version": SCHEMA_VERSION,
             "embedding": {
-                "text_model": "text-embedding-3-large",
-                "text_dim": 3072,
-                "image_dim": 2048,
-                "concat_dim": 5120,
+                "text_model": "text-embedding-3-small",
+                "text_dim": 1536,
+                "image_dim": 4096,
+                "concat_dim": 5632,
                 "vector_encoding": "base64_f32",
             },
             "slides": [],

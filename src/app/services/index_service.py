@@ -41,9 +41,9 @@ class IndexService:
         idx = self.store.load_index()
         emb = idx.get("embedding", {})
         self.emb_cfg = EmbeddingConfig(
-            text_model=str(emb.get("text_model", "text-embedding-3-large")),
-            text_dim=int(emb.get("text_dim", 3072)),
-            image_dim=int(emb.get("image_dim", 2048)),
+            text_model=str(emb.get("text_model", "text-embedding-3-small")),
+            text_dim=int(emb.get("text_dim", 1536)),
+            image_dim=int(emb.get("image_dim", 4096)),
         )
 
         self.extractor = ExtractionService()
@@ -152,7 +152,7 @@ class IndexService:
                 tv = text_vecs[si - 1] if si - 1 < len(text_vecs) else np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
                 tv_b64 = vec_to_b64_f32(tv)
 
-                # concat：text(3072)+image(2048)，若缺 image 就補 0
+                # concat：text(1536)+image(4096)，若缺 image 就補 0
                 if img_vec_b64:
                     try:
                         iv = np.frombuffer(base64.b64decode(img_vec_b64.encode("ascii")), dtype=np.float32)

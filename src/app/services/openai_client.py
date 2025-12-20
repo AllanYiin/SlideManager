@@ -15,7 +15,7 @@ log = get_logger(__name__)
 @dataclass
 class OpenAIConfig:
     responses_model: str = "gpt-4.1"
-    embeddings_model: str = "text-embedding-3-large"
+    embeddings_model: str = "text-embedding-3-small"
     temperature: float = 0.4
     max_output_tokens: int = 2048
     timeout: float = 60.0

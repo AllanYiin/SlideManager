@@ -15,9 +15,9 @@ MODEL_INPUT_SIZE = 224
 
 
 class ImageEmbedder:
-    """圖片向量（2048 維）。"""
+    """圖片向量（4096 維）。"""
 
-    def __init__(self, model_path: Optional[Path] = None, dim: int = 2048):
+    def __init__(self, model_path: Optional[Path] = None, dim: int = 4096):
         self.dim = int(dim)
         self.model_path = model_path
         self._ort_session = None
