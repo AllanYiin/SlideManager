@@ -141,6 +141,8 @@ class CatalogService:
             walker = root.rglob("*.pptx") if entry.get("recursive", True) else root.glob("*.pptx")
             try:
                 for path in walker:
+                    if path.name.startswith("~$"):
+                        continue
                     try:
                         st = path.stat()
                         abs_path = str(path.resolve())
