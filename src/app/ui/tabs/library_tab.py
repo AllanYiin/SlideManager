@@ -34,6 +34,16 @@ from app.ui.async_worker import Worker
 log = get_logger(__name__)
 
 
+class SortableItem(QTableWidgetItem):
+    def __init__(self, text: str, sort_key: object | None = None) -> None:
+        super().__init__(text)
+        self._sort_key = sort_key if sort_key is not None else text
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        other_key = getattr(other, "_sort_key", other.text())
+        return self._sort_key < other_key
+
+
 class LibraryTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -111,6 +121,9 @@ class LibraryTab(QWidget):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSortIndicator(0, Qt.AscendingOrder)
+        header.setSortIndicatorShown(True)
+        self.table.setSortingEnabled(True)
         right_layout.addWidget(self.table)
 
         prog_row = QHBoxLayout()
@@ -294,9 +307,16 @@ class LibraryTab(QWidget):
         if kw:
             files = [f for f in files if kw in (f.get("filename", "").lower())]
 
+        sorting_enabled = self.table.isSortingEnabled()
+        if sorting_enabled:
+            self.table.setSortingEnabled(False)
         self.table.setRowCount(len(files))
         for r, f in enumerate(files):
             self._set_row(r, f)
+        if sorting_enabled:
+            self.table.setSortingEnabled(True)
+            header = self.table.horizontalHeader()
+            self.table.sortItems(header.sortIndicatorSection(), header.sortIndicatorOrder())
 
     def _set_row(self, r: int, f: Dict[str, Any]) -> None:
         fn = f.get("filename", "")
@@ -323,8 +343,16 @@ class LibraryTab(QWidget):
                 f"投影片數：{slides_s}",
             ]
         )
+        sort_keys = [
+            fn.lower(),
+            path.lower(),
+            int(mtime or 0),
+            int(size or 0),
+            {"未處理": 0, "部分索引": 1, "已擷取": 2, "已索引": 3}.get(status, 99),
+            int(slides) if slides is not None else -1,
+        ]
         for c, val in enumerate([fn, path, mtime_s, size_s, status, slides_s]):
-            it = QTableWidgetItem(str(val))
+            it = SortableItem(str(val), sort_keys[c])
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
             it.setToolTip(tooltip)
             if status == "已索引":
