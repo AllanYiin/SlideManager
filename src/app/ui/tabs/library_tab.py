@@ -1,0 +1,307 @@
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import datetime
+from pathlib import Path
+from typing import Any, Dict, List
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QFileDialog,
+)
+
+from app.core.logging import get_logger
+from app.ui.async_worker import Worker
+
+log = get_logger(__name__)
+
+
+class LibraryTab(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.ctx = None
+
+        self._cancel_index = False
+
+        root = QHBoxLayout(self)
+        split = QSplitter(Qt.Horizontal)
+        root.addWidget(split)
+
+        # Left panel: whitelist dirs
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        gb = QGroupBox("白名單目錄")
+        gbl = QVBoxLayout(gb)
+        self.dir_list = QListWidget()
+        gbl.addWidget(self.dir_list)
+
+        btn_row = QHBoxLayout()
+        self.btn_add_dir = QPushButton("新增")
+        self.btn_remove_dir = QPushButton("移除")
+        btn_row.addWidget(self.btn_add_dir)
+        btn_row.addWidget(self.btn_remove_dir)
+        gbl.addLayout(btn_row)
+        left_layout.addWidget(gb)
+
+        self.btn_scan = QPushButton("掃描檔案")
+        self.btn_index_needed = QPushButton("開始索引（需要者）")
+        self.btn_index_selected = QPushButton("開始索引（選取檔案）")
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setEnabled(False)
+
+        left_layout.addWidget(self.btn_scan)
+        left_layout.addWidget(self.btn_index_needed)
+        left_layout.addWidget(self.btn_index_selected)
+        left_layout.addWidget(self.btn_cancel)
+        left_layout.addStretch(1)
+
+        # Right panel: file table + progress
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("篩選："))
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("輸入檔名關鍵字")
+        filter_row.addWidget(self.filter_edit)
+        right_layout.addLayout(filter_row)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["檔名", "路徑", "修改時間", "大小", "已索引", "投影片數"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        right_layout.addWidget(self.table)
+
+        prog_row = QHBoxLayout()
+        self.prog = QProgressBar()
+        self.prog.setValue(0)
+        self.prog_label = QLabel("就緒")
+        prog_row.addWidget(self.prog)
+        prog_row.addWidget(self.prog_label)
+        right_layout.addLayout(prog_row)
+
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 3)
+
+        # Signals
+        self.btn_add_dir.clicked.connect(self.add_dir)
+        self.btn_remove_dir.clicked.connect(self.remove_dir)
+        self.btn_scan.clicked.connect(self.scan_files)
+        self.btn_index_needed.clicked.connect(self.start_index_needed)
+        self.btn_index_selected.clicked.connect(self.start_index_selected)
+        self.btn_cancel.clicked.connect(self.cancel_indexing)
+        self.filter_edit.textChanged.connect(self.refresh_table)
+
+    def set_context(self, ctx) -> None:
+        self.ctx = ctx
+        self.refresh_dirs()
+        self.refresh_table()
+
+    # ---------- whitelist dirs ----------
+    def refresh_dirs(self) -> None:
+        self.dir_list.clear()
+        if not self.ctx:
+            return
+        dirs = self.ctx.catalog.get_whitelist_dirs()
+        for d in dirs:
+            self.dir_list.addItem(d)
+
+    def add_dir(self) -> None:
+        if not self.ctx:
+            QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
+            return
+        d = QFileDialog.getExistingDirectory(self, "選擇要納入的資料夾")
+        if not d:
+            return
+        self.ctx.catalog.add_whitelist_dir(d)
+        self.refresh_dirs()
+
+    def remove_dir(self) -> None:
+        if not self.ctx:
+            return
+        item = self.dir_list.currentItem()
+        if not item:
+            return
+        p = item.text()
+        self.ctx.catalog.remove_whitelist_dir(p)
+        self.refresh_dirs()
+
+    # ---------- scan ----------
+    def scan_files(self) -> None:
+        if not self.ctx:
+            QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
+            return
+
+        self.prog_label.setText("掃描中...")
+        self.prog.setRange(0, 0)
+
+        def task():
+            return self.ctx.catalog.scan()
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_scan_done)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_scan_done(self, _result: object) -> None:
+        self.prog.setRange(0, 100)
+        self.prog.setValue(0)
+        self.prog_label.setText("掃描完成")
+        self.refresh_table()
+
+    # ---------- table ----------
+    def refresh_table(self) -> None:
+        if not self.ctx:
+            self.table.setRowCount(0)
+            return
+        cat = self.ctx.store.load_catalog()
+        files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+        kw = (self.filter_edit.text() or "").strip().lower()
+        if kw:
+            files = [f for f in files if kw in (f.get("filename", "").lower())]
+
+        self.table.setRowCount(len(files))
+        for r, f in enumerate(files):
+            self._set_row(r, f)
+        self.table.resizeColumnsToContents()
+
+    def _set_row(self, r: int, f: Dict[str, Any]) -> None:
+        fn = f.get("filename", "")
+        path = f.get("abs_path", "")
+        mtime = f.get("modified_time")
+        try:
+            dt = datetime.datetime.fromtimestamp(int(mtime))
+            mtime_s = dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            mtime_s = ""
+        size = f.get("size", 0)
+        size_s = f"{int(size)/1024/1024:.1f} MB" if size else ""
+        indexed = "是" if f.get("indexed") else "否"
+        slides = str(f.get("slides_count", 0))
+
+        for c, val in enumerate([fn, path, mtime_s, size_s, indexed, slides]):
+            it = QTableWidgetItem(str(val))
+            it.setFlags(it.flags() ^ Qt.ItemIsEditable)
+            self.table.setItem(r, c, it)
+
+    def selected_files(self) -> List[Dict[str, Any]]:
+        if not self.ctx:
+            return []
+        cat = self.ctx.store.load_catalog()
+        files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+        path_to_file = {f.get("abs_path"): f for f in files if f.get("abs_path")}
+
+        selected = []
+        for idx in self.table.selectionModel().selectedRows():
+            path = self.table.item(idx.row(), 1).text()
+            if path in path_to_file:
+                selected.append(path_to_file[path])
+        return selected
+
+    # ---------- indexing ----------
+    def start_index_needed(self) -> None:
+        if not self.ctx:
+            return
+        self.ctx.catalog.scan()
+        files = self.ctx.indexer.compute_needed_files()
+        if not files:
+            QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
+            return
+        self._start_index(files)
+
+    def start_index_selected(self) -> None:
+        if not self.ctx:
+            return
+        self.ctx.catalog.scan()
+        files = self.selected_files()
+        if not files:
+            QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
+            return
+        self._start_index(files)
+
+    def _start_index(self, files: List[Dict[str, Any]]):
+        self._cancel_index = False
+        self.btn_cancel.setEnabled(True)
+        self.btn_index_needed.setEnabled(False)
+        self.btn_index_selected.setEnabled(False)
+
+        self.prog.setRange(0, 100)
+        self.prog.setValue(0)
+        self.prog_label.setText("索引中...")
+
+        def task(_progress_emit):
+            def cancelled() -> bool:
+                return self._cancel_index
+
+            def progress_hook(p):
+                _progress_emit(p)
+
+            return self.ctx.indexer.rebuild_for_files(files, on_progress=progress_hook, cancel_flag=cancelled)
+
+        w = Worker(task, None)
+        # 將 signals.progress.emit 注入到 task 參數
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_index_progress)
+        w.signals.finished.connect(self._on_index_done)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_index_progress(self, p: object) -> None:
+        try:
+            msg = getattr(p, "message", "")
+            cur = int(getattr(p, "current", 0))
+            total = int(getattr(p, "total", 0))
+            if total > 0:
+                self.prog.setValue(int(cur / total * 100))
+            self.prog_label.setText(msg or "索引中...")
+            if msg:
+                self.main_window.status.showMessage(msg)
+        except Exception:
+            pass
+
+    def cancel_indexing(self) -> None:
+        self._cancel_index = True
+        self.prog_label.setText("取消中...")
+
+    def _on_index_done(self, result: object) -> None:
+        self.btn_cancel.setEnabled(False)
+        self.btn_index_needed.setEnabled(True)
+        self.btn_index_selected.setEnabled(True)
+        self.refresh_table()
+
+        try:
+            code, msg = result
+            if code == 0:
+                self.prog.setValue(100)
+                self.prog_label.setText(msg)
+            else:
+                self.prog_label.setText(msg)
+        except Exception:
+            self.prog_label.setText("索引完成")
+
+    def _on_error(self, tb: str) -> None:
+        log.error("背景任務錯誤\n%s", tb)
+        QMessageBox.critical(self, "發生錯誤", "發生錯誤。請複製以下訊息並發送給您的 AI 助手：\n\n" + tb)
+        self.btn_cancel.setEnabled(False)
+        self.btn_index_needed.setEnabled(True)
+        self.btn_index_selected.setEnabled(True)
+        self.prog_label.setText("發生錯誤")

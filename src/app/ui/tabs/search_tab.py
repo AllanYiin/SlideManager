@@ -1,0 +1,236 @@
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, List, Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QComboBox,
+    QSlider,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QTextEdit,
+)
+from PySide6.QtWidgets import QAbstractItemView
+from app.core.logging import get_logger
+from app.services.search_service import SearchQuery
+
+log = get_logger(__name__)
+
+
+class SearchTab(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.ctx = None
+        self._image_path: Optional[Path] = None
+        self._last_results = []
+
+        root = QHBoxLayout(self)
+        split = QSplitter(Qt.Horizontal)
+        root.addWidget(split)
+
+        # Left: controls + results
+        left = QWidget()
+        ll = QVBoxLayout(left)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("文字查詢："))
+        self.query_edit = QLineEdit()
+        self.query_edit.setPlaceholderText("例如：交接流程 / 招募 / roadmap")
+        row1.addWidget(self.query_edit)
+        self.btn_search = QPushButton("搜尋")
+        row1.addWidget(self.btn_search)
+        ll.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("模式："))
+        self.mode = QComboBox()
+        self.mode.addItems(["hybrid", "bm25", "vector_text", "vector_concat", "vector_image"])
+        row2.addWidget(self.mode)
+
+        row2.addWidget(QLabel("Hybrid 權重（文字→向量）："))
+        self.weight = QSlider(Qt.Horizontal)
+        self.weight.setRange(0, 100)
+        self.weight.setValue(50)
+        row2.addWidget(self.weight)
+        ll.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        self.btn_pick_image = QPushButton("選擇圖片（以圖搜圖）")
+        self.lbl_image = QLabel("未選擇")
+        self.lbl_image.setMinimumWidth(200)
+        row3.addWidget(self.btn_pick_image)
+        row3.addWidget(self.lbl_image)
+        ll.addLayout(row3)
+
+        self.results = QTableWidget(0, 5)
+        self.results.setHorizontalHeaderLabels(["縮圖", "分數", "檔名", "頁碼", "標題"])
+        self.results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results.verticalHeader().setVisible(False)
+        self.results.horizontalHeader().setStretchLastSection(True)
+        ll.addWidget(self.results)
+
+        # Right: preview
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        self.preview_img = QLabel("預覽")
+        self.preview_img.setAlignment(Qt.AlignCenter)
+        self.preview_img.setMinimumHeight(240)
+        self.preview_img.setStyleSheet("border: 1px solid #ddd;")
+        rl.addWidget(self.preview_img)
+
+        self.preview_text = QTextEdit()
+        self.preview_text.setReadOnly(True)
+        rl.addWidget(self.preview_text)
+
+        btn_row = QHBoxLayout()
+        self.btn_open_file = QPushButton("開啟檔案位置")
+        self.btn_open_file.setEnabled(False)
+        btn_row.addWidget(self.btn_open_file)
+        btn_row.addStretch(1)
+        rl.addLayout(btn_row)
+
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+
+        # Signals
+        self.btn_search.clicked.connect(self.do_search)
+        self.query_edit.returnPressed.connect(self.do_search)
+        self.btn_pick_image.clicked.connect(self.pick_image)
+        self.results.itemSelectionChanged.connect(self.on_select_result)
+        self.btn_open_file.clicked.connect(self.open_file_location)
+
+    def set_context(self, ctx) -> None:
+        self.ctx = ctx
+        self._last_results = []
+        self.results.setRowCount(0)
+        self.preview_img.setText("預覽")
+        self.preview_text.setText("")
+        self.btn_open_file.setEnabled(False)
+
+    def pick_image(self) -> None:
+        fp, _ = QFileDialog.getOpenFileName(self, "選擇圖片", "", "Images (*.png *.jpg *.jpeg *.webp)")
+        if not fp:
+            return
+        self._image_path = Path(fp)
+        self.lbl_image.setText(self._image_path.name)
+
+    def do_search(self) -> None:
+        if not self.ctx:
+            QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
+            return
+        text = (self.query_edit.text() or "").strip()
+        if not text and self.mode.currentText() != "vector_image":
+            QMessageBox.information(self, "缺少查詢", "請輸入文字查詢")
+            return
+
+        m = self.mode.currentText()
+        wv = self.weight.value() / 100.0
+        q = SearchQuery(
+            text=text,
+            mode=m,
+            weight_text=1.0 - wv,
+            weight_vector=wv,
+            top_k=50,
+        )
+
+        image_vec = None
+        if m == "vector_image":
+            if not self._image_path or not self._image_path.exists():
+                QMessageBox.information(self, "未選擇圖片", "請先選擇一張圖片")
+                return
+            try:
+                b = self._image_path.read_bytes()
+                image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(b)
+            except Exception as e:
+                QMessageBox.critical(self, "讀取圖片失敗", f"{e}")
+                return
+
+        results = self.ctx.search.search(q, image_vec=image_vec)
+        self._last_results = results
+        self.render_results()
+
+    def render_results(self) -> None:
+        self.results.setRowCount(len(self._last_results))
+        for r, res in enumerate(self._last_results):
+            s = res.slide
+            thumb = s.get("thumb_path")
+
+            # thumb
+            lbl = QLabel()
+            lbl.setAlignment(Qt.AlignCenter)
+            if thumb and Path(thumb).exists() and Path(thumb).stat().st_size > 0:
+                pix = QPixmap(thumb)
+                if not pix.isNull():
+                    lbl.setPixmap(pix.scaled(160, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.results.setCellWidget(r, 0, lbl)
+
+            self.results.setItem(r, 1, QTableWidgetItem(f"{res.score:.3f}"))
+            self.results.setItem(r, 2, QTableWidgetItem(str(s.get("filename", ""))))
+            self.results.setItem(r, 3, QTableWidgetItem(str(s.get("page", ""))))
+            self.results.setItem(r, 4, QTableWidgetItem(str(s.get("title", ""))))
+
+        self.results.resizeColumnsToContents()
+
+    def on_select_result(self) -> None:
+        sel = self.results.selectionModel().selectedRows()
+        if not sel:
+            self.btn_open_file.setEnabled(False)
+            return
+        row = sel[0].row()
+        if row < 0 or row >= len(self._last_results):
+            return
+        s = self._last_results[row].slide
+
+        thumb = s.get("thumb_path")
+        if thumb and Path(thumb).exists() and Path(thumb).stat().st_size > 0:
+            pix = QPixmap(thumb)
+            if not pix.isNull():
+                self.preview_img.setPixmap(pix.scaled(800, 450, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.preview_img.setText("（無法載入縮圖）")
+        else:
+            self.preview_img.setText("（無縮圖）")
+
+        txt = f"檔案：{s.get('file_path','')}\n頁碼：{s.get('page','')}\n\n標題：{s.get('title','')}\n\n內容：\n{s.get('all_text','')}"
+        self.preview_text.setText(txt)
+        self.btn_open_file.setEnabled(True)
+
+    def open_file_location(self) -> None:
+        sel = self.results.selectionModel().selectedRows()
+        if not sel:
+            return
+        row = sel[0].row()
+        if row < 0 or row >= len(self._last_results):
+            return
+        s = self._last_results[row].slide
+        p = s.get("file_path")
+        if not p:
+            return
+        try:
+            pp = Path(p)
+            if os.name == "nt":
+                os.startfile(str(pp.parent))  # type: ignore
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", str(pp.parent)])
+        except Exception as e:
+            QMessageBox.critical(self, "開啟失敗", f"{e}")
