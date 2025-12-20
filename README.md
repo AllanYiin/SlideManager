@@ -8,8 +8,8 @@
 - 對話式搜尋（可選：需設定 OpenAI API Key）
 
 重要說明：
-- 若您的電腦沒有可用的投影片渲染器（例如 LibreOffice），本工具仍可正常建立文字索引；縮圖會以 placeholder 取代。
-- 若未設定 OpenAI API Key，向量功能會使用 fallback_hash 退化模式（可用但品質較差）。
+- 若您的電腦沒有可用的投影片渲染器（例如 LibreOffice），本工具仍可正常建立文字索引，但不會產生縮圖。
+- 若未設定 OpenAI API Key，向量功能會停用，僅提供 BM25 文字搜尋。
 
 ## 一鍵啟動
 
@@ -36,7 +36,7 @@
 - `project.json`：白名單資料夾等專案設定
 - `catalog.json`：掃描到的 .pptx 清單與 metadata
 - `index.json`：投影片級索引（文字、向量、縮圖路徑）
-- `thumbs/`：縮圖輸出（或 placeholder）
+- `thumbs/`：縮圖輸出（需有可用 renderer）
 - `cache/`：快取（可放 `image_embedder.onnx` 以啟用 ONNX 圖片向量）
 
 ## 診斷與選配能力
@@ -69,4 +69,3 @@
 │     └─ utils/
 └─ tests/
 ```
-

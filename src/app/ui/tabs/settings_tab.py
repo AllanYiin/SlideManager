@@ -154,11 +154,11 @@ class SettingsTab(QWidget):
         lines.append(f"LibreOffice：{status_map.get('libreoffice')}")
         lines.append(f"Windows COM：{status_map.get('windows_com')}")
         model_status = self.ctx.indexer.image_embedder.status()
-        lines.append(f"ONNX 啟用：{'是' if self.ctx.indexer.image_embedder.enabled_onnx() else '否（退化 hash）'}")
+        lines.append(f"ONNX 啟用：{'是' if self.ctx.indexer.image_embedder.enabled_onnx() else '否（未啟用）'}")
         lines.append(f"圖片模型版本：{model_status.version}")
         lines.append(f"圖片模型狀態：{model_status.detail}")
         lines.append("")
-        lines.append("提示：若未設定 API Key，向量搜尋仍可用，但品質較差（fallback_hash）。")
+        lines.append("提示：若未設定 API Key，向量搜尋會停用，僅提供 BM25 文字搜尋。")
 
         self.diag.setText("\n".join(lines))
 
