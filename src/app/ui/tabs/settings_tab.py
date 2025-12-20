@@ -111,7 +111,7 @@ class SettingsTab(QWidget):
             from app.services.openai_client import OpenAIClient
 
             c = OpenAIClient(key)
-            vecs = c.embed_texts(["test"], model="text-embedding-3-large")
+            vecs = c.embed_texts(["test"], model="text-embedding-3-small")
             if vecs and len(vecs[0]) > 0:
                 QMessageBox.information(self, "測試成功", f"已取得向量維度：{len(vecs[0])}")
             else:

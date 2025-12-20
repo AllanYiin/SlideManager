@@ -16,9 +16,9 @@ log = get_logger(__name__)
 
 @dataclass
 class EmbeddingConfig:
-    text_model: str = "text-embedding-3-large"
-    text_dim: int = 3072
-    image_dim: int = 2048
+    text_model: str = "text-embedding-3-small"
+    text_dim: int = 1536
+    image_dim: int = 4096
 
 
 class EmbeddingService:

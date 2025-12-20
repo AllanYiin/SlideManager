@@ -62,9 +62,9 @@ class SearchService:
         idx = self.store.load_index()
         emb = idx.get("embedding", {})
         self.emb_cfg = EmbeddingConfig(
-            text_model=str(emb.get("text_model", "text-embedding-3-large")),
-            text_dim=int(emb.get("text_dim", 3072)),
-            image_dim=int(emb.get("image_dim", 2048)),
+            text_model=str(emb.get("text_model", "text-embedding-3-small")),
+            text_dim=int(emb.get("text_dim", 1536)),
+            image_dim=int(emb.get("image_dim", 4096)),
         )
         self.embeddings = EmbeddingService(api_key, self.emb_cfg)
 
