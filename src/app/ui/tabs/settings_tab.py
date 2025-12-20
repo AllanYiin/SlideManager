@@ -55,6 +55,13 @@ class SettingsTab(QWidget):
 
         root.addWidget(gb_key)
 
+        gb_whitelist = QGroupBox("白名單目錄")
+        wl = QVBoxLayout(gb_whitelist)
+        self.whitelist = QTextEdit()
+        self.whitelist.setReadOnly(True)
+        wl.addWidget(self.whitelist)
+        root.addWidget(gb_whitelist)
+
         gb_diag = QGroupBox("診斷資訊")
         dl = QVBoxLayout(gb_diag)
         self.diag = QTextEdit()
@@ -78,6 +85,7 @@ class SettingsTab(QWidget):
     def set_context(self, ctx) -> None:
         self.ctx = ctx
         self._load_key()
+        self.refresh_whitelist()
         self.refresh_diagnostics()
 
     def _load_key(self) -> None:
@@ -153,6 +161,22 @@ class SettingsTab(QWidget):
         lines.append("提示：若未設定 API Key，向量搜尋仍可用，但品質較差（fallback_hash）。")
 
         self.diag.setText("\n".join(lines))
+
+    def refresh_whitelist(self) -> None:
+        if not self.ctx:
+            self.whitelist.setText("尚未開啟專案")
+            return
+        entries = self.ctx.catalog.get_whitelist_entries()
+        if not entries:
+            self.whitelist.setText("尚未設定白名單目錄")
+            return
+        lines = []
+        for entry in entries:
+            path = entry.get("path", "")
+            enabled = "啟用" if entry.get("enabled", True) else "停用"
+            recursive = "遞迴" if entry.get("recursive", True) else "僅此層"
+            lines.append(f"{path}（{enabled} / {recursive}）")
+        self.whitelist.setText("\n".join(lines))
 
     def open_logs_folder(self) -> None:
         try:
