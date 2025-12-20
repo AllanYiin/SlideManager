@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -14,7 +15,7 @@ from app.core.errors import ErrorCode, format_user_message
 from app.core.logging import get_logger
 from app.services.catalog_service import CatalogService
 from app.services.embedding_service import EmbeddingConfig, EmbeddingService
-from app.services.extraction_service import ExtractionService
+from app.services.extraction_service import ExtractionService, SlideText
 from app.services.image_embedder import ImageEmbeddingService
 from app.services.project_store import ProjectStore
 from app.services.render_service import RenderService
@@ -30,6 +31,32 @@ class IndexProgress:
     current: int
     total: int
     message: str
+
+
+@dataclass
+class SlideWork:
+    file_entry: Dict[str, Any]
+    abs_path: str
+    file_hash: str
+    filename: str
+    page: int
+    slide_text: Optional[SlideText]
+    thumb_path: Optional[str]
+    index: int = 0
+
+
+@dataclass
+class FileStageData:
+    file_entry: Dict[str, Any]
+    abs_path: str
+    file_hash: str
+    pptx: Path
+    slide_texts: List[SlideText]
+    thumbs: List[Path]
+    slide_count: int
+    start_mtime: int
+    start_size: int
+    slides: List[SlideWork]
 
 
 class IndexService:
@@ -132,11 +159,18 @@ class IndexService:
         slides = [s for s in slides if s.get("file_path") not in target_paths]
 
         total_files = len(files)
+        stage2_units = 0
+        if update_text:
+            stage2_units += 2
+        if update_image:
+            stage2_units += 1
+        overall_total = total_files * 2 + stage2_units
         render_message = ""
+        staged_files: List[FileStageData] = []
         for fi, f in enumerate(files, start=1):
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
-            if not wait_if_paused(fi, total_files):
+            if not wait_if_paused(fi, overall_total):
                 return 1, "已取消"
 
             abs_path = f.get("abs_path")
@@ -149,7 +183,7 @@ class IndexService:
                 message = format_user_message(ErrorCode.PATH_NOT_FOUND, detail=str(pptx))
                 log.warning("[PATH_NOT_FOUND] %s", message)
                 self.catalog.mark_index_error(abs_path, ErrorCode.PATH_NOT_FOUND.value, message)
-                progress("skip", fi, total_files, "檔案已移除，已略過")
+                progress("skip", fi, overall_total, "檔案已移除，已略過")
                 continue
             try:
                 start_stat = pptx.stat()
@@ -159,7 +193,7 @@ class IndexService:
                 message = format_user_message(ErrorCode.PERMISSION_DENIED, detail=str(exc))
                 log.warning("[PERMISSION_DENIED] %s", message)
                 self.catalog.mark_index_error(abs_path, ErrorCode.PERMISSION_DENIED.value, message)
-                progress("skip", fi, total_files, "檔案權限不足，已略過")
+                progress("skip", fi, overall_total, "檔案權限不足，已略過")
                 continue
             except Exception as exc:
                 log.warning("讀取檔案狀態失敗：%s (%s)", pptx, exc)
@@ -169,67 +203,183 @@ class IndexService:
                 message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
                 log.warning("[MTIME_CHANGED] %s", message)
                 self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
-                progress("skip", fi, total_files, "檔案已變更，請重新掃描")
+                progress("skip", fi, overall_total, "檔案已變更，請重新掃描")
                 continue
 
             slide_count = int(f.get("slide_count") or 0)
 
             if update_text:
-                progress("extract", fi, total_files, f"抽取文字：{pptx.name}")
+                progress("extract", fi, overall_total, f"抽取文字：{pptx.name}")
                 slide_texts = self.extractor.extract(pptx)
             else:
                 slide_texts = []
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
-            if not wait_if_paused(fi, total_files):
+            if not wait_if_paused(fi, overall_total):
                 return 1, "已取消"
 
             if update_image:
-                progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
+                progress("render", fi, overall_total, f"產生縮圖：{pptx.name}")
                 rr = self.renderer.render_pptx(pptx, file_hash, slides_count=slide_count or len(slide_texts))
                 render_message = rr.message
                 thumbs = rr.thumbs
                 if not rr.ok:
                     log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
-                    progress("render", fi, total_files, rr.message)
+                    progress("render", fi, overall_total, rr.message)
             else:
                 thumbs = []
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
-            if not wait_if_paused(fi, total_files):
+            if not wait_if_paused(fi, overall_total):
                 return 1, "已取消"
 
-            if update_text and self.embeddings.has_openai():
-                progress("embed", fi, total_files, f"產生向量：{pptx.name}")
-                # text embeddings（分批）
-                all_texts = [st.all_text for st in slide_texts]
-                text_vecs = self.embeddings.embed_text_batch(all_texts)
-            elif update_text:
-                progress("embed", fi, total_files, f"未設定 API Key，略過向量：{pptx.name}")
-                text_vecs = []
-            else:
-                text_vecs = []
-
-            new_entries = []
             source_slide_count = len(slide_texts) if slide_texts else slide_count
             slide_count = max(slide_count, source_slide_count)
-
+            file_slides: List[SlideWork] = []
             if update_text and slide_texts:
                 slide_iter = enumerate(slide_texts, start=1)
             else:
                 slide_iter = ((si, None) for si in range(1, slide_count + 1))
+            for si, st in slide_iter:
+                thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None
+                file_slides.append(
+                    SlideWork(
+                        file_entry=f,
+                        abs_path=abs_path,
+                        file_hash=file_hash,
+                        filename=pptx.name,
+                        page=si,
+                        slide_text=st,
+                        thumb_path=thumb_path,
+                    )
+                )
+            staged_files.append(
+                FileStageData(
+                    file_entry=f,
+                    abs_path=abs_path,
+                    file_hash=file_hash,
+                    pptx=pptx,
+                    slide_texts=slide_texts,
+                    thumbs=thumbs,
+                    slide_count=slide_count,
+                    start_mtime=start_mtime,
+                    start_size=start_size,
+                    slides=file_slides,
+                )
+            )
 
+        if cancel_flag and cancel_flag():
+            return 1, "已取消"
+
+        all_slides: List[SlideWork] = []
+        for fd in staged_files:
+            for slide in fd.slides:
+                slide.index = len(all_slides)
+                all_slides.append(slide)
+
+        text_vecs_by_index: List[Optional[np.ndarray]] = [None] * len(all_slides)
+        bm25_tokens_by_index: List[Optional[List[str]]] = [None] * len(all_slides)
+        image_vecs_by_index: List[Optional[np.ndarray]] = [None] * len(all_slides)
+
+        text_indices: List[int] = []
+        text_payload: List[str] = []
+        for slide in all_slides:
+            if update_text and slide.slide_text is not None:
+                text_indices.append(slide.index)
+                text_payload.append(slide.slide_text.all_text)
+
+        image_indices: List[int] = []
+        image_paths: List[Path] = []
+        for slide in all_slides:
+            if update_image and slide.thumb_path:
+                image_indices.append(slide.index)
+                image_paths.append(Path(slide.thumb_path))
+
+        bm25_future = None
+        image_future = None
+        bm25_progress = total_files + 1 if update_text else None
+        text_progress = total_files + 2 if update_text else None
+        image_progress = total_files + stage2_units if update_image else None
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            if update_text and text_payload:
+                progress(
+                    "bm25_start",
+                    bm25_progress or total_files,
+                    overall_total,
+                    "建立 BM25 索引中...",
+                )
+                bm25_future = executor.submit(lambda: [tokenize(t) for t in text_payload])
+            if update_image and image_paths:
+                progress(
+                    "embed_image_start",
+                    image_progress or total_files,
+                    overall_total,
+                    "批次產生圖片向量中...",
+                )
+                image_future = executor.submit(
+                    self.image_embedder.embed_images,
+                    image_paths,
+                    dim=self.emb_cfg.image_dim,
+                    batch_size=16,
+                )
+
+            if update_text and self.embeddings.has_openai() and text_payload:
+                progress(
+                    "embed_text",
+                    text_progress or total_files,
+                    overall_total,
+                    "產生文字向量中...",
+                )
+                text_vecs = self.embeddings.embed_text_batch(text_payload)
+                for idx, vec in zip(text_indices, text_vecs):
+                    text_vecs_by_index[idx] = vec
+            elif update_text:
+                if not text_payload:
+                    progress(
+                        "embed_text_skip",
+                        text_progress or total_files,
+                        overall_total,
+                        "無可用文字，略過文字向量",
+                    )
+                else:
+                    progress(
+                        "embed_text_skip",
+                        text_progress or total_files,
+                        overall_total,
+                        "未設定 API Key，略過文字向量",
+                    )
+
+            if bm25_future:
+                try:
+                    tokens = bm25_future.result()
+                    for idx, tok in zip(text_indices, tokens):
+                        bm25_tokens_by_index[idx] = tok
+                except Exception as exc:
+                    log.warning("BM25 tokens 建立失敗：%s", exc)
+            if image_future:
+                try:
+                    image_vecs = image_future.result()
+                    for idx, vec in zip(image_indices, image_vecs):
+                        image_vecs_by_index[idx] = vec
+                except Exception as exc:
+                    log.warning("圖片向量批次產生失敗：%s", exc)
+
+        if cancel_flag and cancel_flag():
+            return 1, "已取消"
+
+        for fi, fd in enumerate(staged_files, start=1):
+            if cancel_flag and cancel_flag():
+                return 1, "已取消"
+            if not wait_if_paused(total_files + stage2_units + fi, overall_total):
+                return 1, "已取消"
+
+            new_entries = []
             text_indexed_count = 0
             image_indexed_count = 0
-            for si, st in slide_iter:
-                if cancel_flag and cancel_flag():
-                    return 1, "已取消"
-                if not wait_if_paused(fi, total_files):
-                    return 1, "已取消"
-
-                prev = prev_entries.get((abs_path, si))
+            for slide in fd.slides:
+                prev = prev_entries.get((slide.abs_path, slide.page))
                 prev_title = prev.get("title") if isinstance(prev, dict) else None
                 prev_body = prev.get("body") if isinstance(prev, dict) else None
                 prev_all_text = prev.get("all_text") if isinstance(prev, dict) else ""
@@ -238,27 +388,22 @@ class IndexService:
                 prev_image_vec = prev.get("image_vec") if isinstance(prev, dict) else None
                 prev_thumb_path = prev.get("thumb_path") if isinstance(prev, dict) else None
 
-                thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None
+                thumb_path = slide.thumb_path
                 img_vec_b64 = None
 
-                # 若縮圖存在且非空，做 image embedding（可退化）
-                if update_image and thumb_path:
-                    try:
-                        b = Path(thumb_path).read_bytes()
-                        if b:
-                            img_vec = self.image_embedder.embed_image_bytes(b, dim=self.emb_cfg.image_dim)
-                            img_vec_b64 = vec_to_b64_f32(img_vec)
-                    except Exception:
-                        img_vec_b64 = None
+                if update_image and slide.index < len(image_vecs_by_index):
+                    img_vec = image_vecs_by_index[slide.index]
+                    if img_vec is not None:
+                        img_vec_b64 = vec_to_b64_f32(img_vec)
 
                 tv = None
-                if update_text and text_vecs and si - 1 < len(text_vecs):
-                    tv = text_vecs[si - 1]
+                if update_text and slide.index < len(text_vecs_by_index):
+                    tv = text_vecs_by_index[slide.index]
                 tv_b64 = vec_to_b64_f32(tv) if tv is not None else None
 
                 has_text_vec = tv is not None
                 has_image_vec = img_vec_b64 is not None
-                if update_text and st is not None:
+                if update_text and slide.slide_text is not None:
                     text_indexed_count += 1
                 if update_image and has_image_vec:
                     image_indexed_count += 1
@@ -294,25 +439,25 @@ class IndexService:
                 else:
                     concat_b64 = None
 
-                slide_id = f"{f.get('file_id')}_{file_hash}_p{si:04d}"
-                if st is None:
+                slide_id = f"{slide.file_entry.get('file_id')}_{slide.file_hash}_p{slide.page:04d}"
+                if slide.slide_text is None:
                     title = prev_title
                     body = prev_body
                     all_text = prev_all_text
                     bm25_tokens = prev_tokens
                 else:
-                    title = st.title
-                    body = st.body
-                    all_text = st.all_text
-                    bm25_tokens = tokenize(st.all_text)
+                    title = slide.slide_text.title
+                    body = slide.slide_text.body
+                    all_text = slide.slide_text.all_text
+                    bm25_tokens = bm25_tokens_by_index[slide.index] or tokenize(slide.slide_text.all_text)
                 new_entries.append(
                     {
                         "slide_id": slide_id,
-                        "file_id": f.get("file_id"),
-                        "file_path": abs_path,
-                        "file_hash": file_hash,
-                        "filename": pptx.name,
-                        "page": si,
+                        "file_id": slide.file_entry.get("file_id"),
+                        "file_path": slide.abs_path,
+                        "file_hash": slide.file_hash,
+                        "filename": slide.filename,
+                        "page": slide.page,
                         "title": title,
                         "body": body,
                         "all_text": all_text,
@@ -326,28 +471,33 @@ class IndexService:
                 )
 
             try:
-                end_stat = pptx.stat()
+                end_stat = fd.pptx.stat()
                 end_mtime = int(end_stat.st_mtime)
                 end_size = int(end_stat.st_size)
             except Exception:
-                end_mtime = start_mtime
-                end_size = start_size
+                end_mtime = fd.start_mtime
+                end_size = fd.start_size
 
-            if end_mtime != start_mtime or end_size != start_size:
-                message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
+            if end_mtime != fd.start_mtime or end_size != fd.start_size:
+                message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(fd.pptx))
                 log.warning("[MTIME_CHANGED] %s", message)
-                self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
-                progress("skip", fi, total_files, "索引期間檔案有變更，已略過")
+                self.catalog.mark_index_error(fd.abs_path, ErrorCode.MTIME_CHANGED.value, message)
+                progress("skip", total_files + stage2_units + fi, overall_total, "索引期間檔案有變更，已略過")
                 continue
 
             slides.extend(new_entries)
             self.catalog.mark_indexed(
-                abs_path,
-                slides_count=slide_count,
+                fd.abs_path,
+                slides_count=fd.slide_count,
                 text_indexed_count=text_indexed_count if update_text else None,
                 image_indexed_count=image_indexed_count if update_image else None,
             )
-            progress("file_done", fi, total_files, f"已更新索引：{pptx.name}")
+            progress(
+                "file_done",
+                total_files + stage2_units + fi,
+                overall_total,
+                f"已更新索引：{fd.pptx.name}",
+            )
 
         index["slides"] = slides
         index["embedding"] = {
@@ -369,5 +519,5 @@ class IndexService:
         }
         self.store.save_index(index)
 
-        progress("done", total_files, total_files, "索引完成")
+        progress("done", overall_total, overall_total, "索引完成")
         return 0, f"已索引 {total_files} 個檔案"
