@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
-from typing import List, Protocol, Tuple
+from typing import List, Optional, Protocol, Tuple
 
 from app.core.logging import get_logger
 
@@ -36,21 +38,137 @@ class Renderer(Protocol):
         ...
 
 
-class LibreOfficeRenderer:
-    name = "libreoffice"
+def _has_pdf2image() -> bool:
+    return find_spec("pdf2image") is not None
+
+
+def _pdf_to_pngs(pdf_path: Path, out_dir: Path) -> List[Path]:
+    from pdf2image import convert_from_path
+
+    paths = convert_from_path(
+        str(pdf_path),
+        output_folder=str(out_dir),
+        fmt="png",
+        paths_only=True,
+    )
+    return [Path(p) for p in paths]
+
+
+class LibreOfficeListener:
+    def __init__(self, soffice_path: str, host: str = "127.0.0.1", port: int = 2002) -> None:
+        self._soffice_path = soffice_path
+        self._host = host
+        self._port = port
+        self._process: Optional[subprocess.Popen[str]] = None
+        atexit.register(self.stop)
+
+    def start(self) -> None:
+        if self._process and self._process.poll() is None:
+            return
+        cmd = [
+            self._soffice_path,
+            "--headless",
+            "--nologo",
+            "--norestore",
+            "--nofirststartwizard",
+            f"--accept=socket,host={self._host},port={self._port},urp;",
+        ]
+        self._process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def stop(self) -> None:
+        if self._process and self._process.poll() is None:
+            self._process.terminate()
+            self._process = None
+
+    def _connect(self):
+        import uno
+
+        local_ctx = uno.getComponentContext()
+        resolver = local_ctx.ServiceManager.createInstanceWithContext(
+            "com.sun.star.bridge.UnoUrlResolver",
+            local_ctx,
+        )
+        last_error: Optional[Exception] = None
+        for _ in range(10):
+            try:
+                return resolver.resolve(
+                    f"uno:socket,host={self._host},port={self._port};urp;StarOffice.ComponentContext"
+                )
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.5)
+        raise RuntimeError("LibreOffice UNO 連線失敗") from last_error
+
+    def convert_to_pdf(self, pptx_path: Path, pdf_path: Path) -> None:
+        from com.sun.star.beans import PropertyValue
+
+        self.start()
+        ctx = self._connect()
+        desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+        doc = desktop.loadComponentFromURL(
+            pptx_path.resolve().as_uri(),
+            "_blank",
+            0,
+            (PropertyValue("Hidden", 0, True, 0),),
+        )
+        try:
+            doc.storeToURL(
+                pdf_path.resolve().as_uri(),
+                (PropertyValue("FilterName", 0, "impress_pdf_Export", 0),),
+            )
+        finally:
+            doc.close(True)
+
+
+class LibreOfficeListenerRenderer:
+    name = "libreoffice_listener"
+
+    def __init__(self) -> None:
+        self._soffice = shutil.which("soffice")
+        self._listener: Optional[LibreOfficeListener] = None
+
+    def available(self) -> bool:
+        return bool(self._soffice) and find_spec("uno") is not None and _has_pdf2image()
+
+    def status_message(self) -> str:
+        if not self._soffice:
+            return "未偵測到 LibreOffice"
+        if find_spec("uno") is None:
+            return "未安裝 UNO"
+        if not _has_pdf2image():
+            return "未安裝 pdf2image"
+        return self._soffice
+
+    def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
+        if not self._soffice:
+            return []
+        if not self._listener:
+            self._listener = LibreOfficeListener(self._soffice)
+        pdf_path = out_dir / f"{pptx_path.stem}.pdf"
+        self._listener.convert_to_pdf(pptx_path, pdf_path)
+        return sorted(_pdf_to_pngs(pdf_path, out_dir))
+
+
+class LibreOfficeCliRenderer:
+    name = "libreoffice_cli"
 
     def __init__(self) -> None:
         self._soffice = shutil.which("soffice")
 
     def available(self) -> bool:
-        return bool(self._soffice)
+        return bool(self._soffice) and _has_pdf2image()
 
     def status_message(self) -> str:
-        return self._soffice or "未偵測"
+        if not self._soffice:
+            return "未偵測到 LibreOffice"
+        if not _has_pdf2image():
+            return "未安裝 pdf2image"
+        return self._soffice
 
     def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
         if not self._soffice:
             return []
+        pdf_path = out_dir / f"{pptx_path.stem}.pdf"
         cmd = [
             self._soffice,
             "--headless",
@@ -59,7 +177,7 @@ class LibreOfficeRenderer:
             "--nolockcheck",
             "--norestore",
             "--convert-to",
-            "png",
+            "pdf",
             "--outdir",
             str(out_dir),
             str(pptx_path),
@@ -67,19 +185,25 @@ class LibreOfficeRenderer:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
         if p.returncode != 0:
             raise RuntimeError(p.stdout[-2000:])
-        return sorted(out_dir.glob("*.png"))
+        if not pdf_path.exists():
+            raise RuntimeError("LibreOffice 未產生 PDF")
+        return sorted(_pdf_to_pngs(pdf_path, out_dir))
 
 
 class WindowsComRenderer:
     name = "windows_com"
 
     def available(self) -> bool:
-        return os.name == "nt" and find_spec("win32com") is not None
+        return os.name == "nt" and find_spec("win32com") is not None and _has_pdf2image()
 
     def status_message(self) -> str:
         if os.name != "nt":
             return "非 Windows"
-        return "可用" if find_spec("win32com") is not None else "未安裝 pywin32"
+        if find_spec("win32com") is None:
+            return "未安裝 pywin32"
+        if not _has_pdf2image():
+            return "未安裝 pdf2image"
+        return "可用"
 
     def render(self, pptx_path: Path, out_dir: Path) -> List[Path]:
         if os.name != "nt":
@@ -91,12 +215,15 @@ class WindowsComRenderer:
         try:
             presentation = powerpoint.Presentations.Open(str(pptx_path), WithWindow=False)
             try:
-                presentation.Export(str(out_dir), "PNG")
+                from win32com.client import constants  # type: ignore
+
+                pdf_path = out_dir / f"{pptx_path.stem}.pdf"
+                presentation.ExportAsFixedFormat(str(pdf_path), constants.ppFixedFormatTypePDF)
             finally:
                 presentation.Close()
         finally:
             powerpoint.Quit()
-        return sorted(out_dir.glob("*.png"))
+        return sorted(_pdf_to_pngs(pdf_path, out_dir))
 
 
 class RenderService:
@@ -111,7 +238,11 @@ class RenderService:
     def __init__(self, thumbs_dir: Path):
         self.thumbs_dir = thumbs_dir
         self.thumbs_dir.mkdir(parents=True, exist_ok=True)
-        self._renderers: List[Renderer] = [LibreOfficeRenderer(), WindowsComRenderer()]
+        self._renderers: List[Renderer] = [
+            WindowsComRenderer(),
+            LibreOfficeListenerRenderer(),
+            LibreOfficeCliRenderer(),
+        ]
 
     def status(self) -> dict:
         available = [r for r in self._renderers if r.available()]
