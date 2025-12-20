@@ -333,35 +333,35 @@ class LibraryTab(QWidget):
 
     def _status_text(self, f: Dict[str, Any]) -> str:
         if f.get("missing"):
-            return "缺失"
+            return "未處理"
         status = f.get("index_status") if isinstance(f.get("index_status"), dict) else {}
         if status.get("last_error"):
-            return "索引錯誤"
+            return "未處理"
         indexed = bool(status.get("indexed")) if status else bool(f.get("indexed"))
         if not indexed:
-            return "未索引"
+            return "未處理"
         mtime = int(f.get("modified_time") or 0)
         index_mtime = int(status.get("index_mtime_epoch") or 0)
         slide_count = f.get("slide_count")
         index_slide_count = status.get("index_slide_count")
         if mtime > index_mtime:
-            return "需要索引"
+            return "已擷取"
         if slide_count is not None and index_slide_count is not None:
             try:
                 if int(slide_count) != int(index_slide_count):
-                    return "需要索引"
+                    return "已擷取"
             except Exception:
-                return "需要索引"
+                return "已擷取"
         if status:
             text_indexed = status.get("text_indexed")
             image_indexed = status.get("image_indexed")
+            if text_indexed is True and image_indexed is True:
+                return "已索引"
             if text_indexed is False and image_indexed is False:
-                return "文字/圖像缺失"
-            if text_indexed is False:
-                return "缺文字索引"
-            if image_indexed is False:
-                return "缺圖像索引"
-        return "已索引"
+                return "已擷取"
+            if text_indexed is not None or image_indexed is not None:
+                return "部分索引"
+        return "已擷取"
 
     def selected_files(self) -> List[Dict[str, Any]]:
         if not self.ctx:
