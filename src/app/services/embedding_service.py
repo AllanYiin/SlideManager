@@ -13,7 +13,7 @@ import numpy as np
 
 from app.core.logging import get_logger
 from app.services.openai_client import OpenAIClient
-from app.utils.vectors import normalize_l2, stable_hash_to_vec
+from app.utils.vectors import normalize_l2
 
 log = get_logger(__name__)
 
@@ -50,6 +50,8 @@ class EmbeddingService:
     def embed_text_batch(self, texts: List[str]) -> List[np.ndarray]:
         if not texts:
             return []
+        if not self._client:
+            return [np.zeros((self.cfg.text_dim,), dtype=np.float32) for _ in texts]
         cleaned = [(t or "").strip() for t in texts]
         out: List[Optional[np.ndarray]] = [None] * len(cleaned)
         missing_texts: List[str] = []
@@ -76,14 +78,14 @@ class EmbeddingService:
                     out[pos] = normalize_l2(v)
                     self._cache[self._cache_key(t)] = v.tolist()
                 else:
-                    out[pos] = stable_hash_to_vec(t, self.cfg.text_dim)
+                    out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
             self._save_cache()
 
         for i, t in enumerate(cleaned):
             if out[i] is None:
-                out[i] = stable_hash_to_vec(t, self.cfg.text_dim)
+                out[i] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
 
-        return [o if o is not None else stable_hash_to_vec("", self.cfg.text_dim) for o in out]
+        return [o if o is not None else np.zeros((self.cfg.text_dim,), dtype=np.float32) for o in out]
 
     def _cache_key(self, text: str) -> str:
         h = hashlib.sha256()
@@ -123,7 +125,7 @@ class EmbeddingService:
                 log.warning("[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s", attempt, exc)
                 if attempt < len(delays):
                     time.sleep(delay)
-        log.error("[OPENAI_ERROR] OpenAI embeddings 最終失敗，改用 fallback 向量")
+        log.error("[OPENAI_ERROR] OpenAI embeddings 最終失敗，改用零向量")
         return []
 
     def _align_dim(self, v: np.ndarray) -> np.ndarray:

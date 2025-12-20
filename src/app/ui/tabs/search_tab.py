@@ -60,6 +60,7 @@ class SearchTab(QWidget):
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("模式："))
         self.mode = QComboBox()
+        self.mode.addItem("純文字（BM25）", "bm25")
         self.mode.addItem("文字（BM25 + 向量）", "text")
         self.mode.addItem("圖片（向量）", "image")
         self.mode.addItem("整體（文字+圖片向量）", "overall")
@@ -145,6 +146,13 @@ class SearchTab(QWidget):
         if not text and mode != "image":
             QMessageBox.information(self, "缺少查詢", "請輸入文字查詢")
             return
+        if not (self.ctx.api_key or "") and mode in {"text", "hybrid", "overall"}:
+            msg = "未設定 API Key，向量搜尋已停用，將改用純文字（BM25）搜尋。"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="warning", timeout_ms=12000)
+            QMessageBox.information(self, "向量搜尋未啟用", msg)
+            mode = "bm25"
+            self.mode.setCurrentIndex(self.mode.findData("bm25"))
 
         m = mode
         wv = self.weight.value() / 100.0

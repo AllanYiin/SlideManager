@@ -92,10 +92,10 @@ class ChatTab(QWidget):
         context = "\n".join(context_lines) if context_lines else "（未找到相關投影片）"
 
         if not (self.ctx.api_key or ""):
-            # 無 API Key：只回本機結果
-            reply = "我已根據您的問題在本機索引中搜尋，找到以下可能相關的投影片：\n\n" + context
-            self._append_assistant(reply)
-            self._messages.append({"role": "assistant", "content": reply})
+            msg = "尚未設定 API Key，對話功能無法連線至後端。請到「設定/診斷」設定後重試。"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="warning", timeout_ms=12000)
+            QMessageBox.information(self, "尚未設定 API Key", msg)
             return
 
         # 有 API Key：串流回答

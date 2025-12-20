@@ -179,11 +179,14 @@ class IndexService:
             if not wait_if_paused(fi, total_files):
                 return 1, "已取消"
 
-            progress("embed", fi, total_files, f"產生向量：{pptx.name}")
-
-            # text embeddings（分批）
-            all_texts = [st.all_text for st in slide_texts]
-            text_vecs = self.embeddings.embed_text_batch(all_texts)
+            if self.embeddings.has_openai():
+                progress("embed", fi, total_files, f"產生向量：{pptx.name}")
+                # text embeddings（分批）
+                all_texts = [st.all_text for st in slide_texts]
+                text_vecs = self.embeddings.embed_text_batch(all_texts)
+            else:
+                progress("embed", fi, total_files, f"未設定 API Key，略過向量：{pptx.name}")
+                text_vecs = []
 
             new_entries = []
             for si, st in enumerate(slide_texts, start=1):
@@ -205,20 +208,27 @@ class IndexService:
                     except Exception:
                         img_vec_b64 = None
 
-                tv = text_vecs[si - 1] if si - 1 < len(text_vecs) else np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
-                tv_b64 = vec_to_b64_f32(tv)
+                tv = text_vecs[si - 1] if si - 1 < len(text_vecs) else None
+                tv_b64 = vec_to_b64_f32(tv) if tv is not None else None
 
-                # concat：text(1536)+image(4096)，若缺 image 就補 0
-                if img_vec_b64:
-                    try:
-                        iv = np.frombuffer(base64.b64decode(img_vec_b64.encode("ascii")), dtype=np.float32)
-                    except Exception:
+                has_text_vec = tv is not None
+                has_image_vec = img_vec_b64 is not None
+                if has_text_vec or has_image_vec:
+                    if has_text_vec:
+                        tv_concat = tv.astype(np.float32)
+                    else:
+                        tv_concat = np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
+                    if has_image_vec:
+                        try:
+                            iv = np.frombuffer(base64.b64decode(img_vec_b64.encode("ascii")), dtype=np.float32)
+                        except Exception:
+                            iv = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
+                    else:
                         iv = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
+                    concat = np.concatenate([tv_concat, iv.astype(np.float32)], axis=0)
+                    concat_b64 = vec_to_b64_f32(concat)
                 else:
-                    iv = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
-
-                concat = np.concatenate([tv.astype(np.float32), iv.astype(np.float32)], axis=0)
-                concat_b64 = vec_to_b64_f32(concat)
+                    concat_b64 = None
 
                 slide_id = f"{f.get('file_id')}_{file_hash}_p{si:04d}"
                 new_entries.append(
@@ -266,8 +276,8 @@ class IndexService:
             "image_dim": self.emb_cfg.image_dim,
             "concat_dim": self.emb_cfg.text_dim + self.emb_cfg.image_dim,
             "vector_encoding": "base64_f32",
-            "text_source": "openai" if self.embeddings.has_openai() else "fallback_hash",
-            "image_source": "onnx" if self.image_embedder.enabled_onnx() else "fallback_hash",
+            "text_source": "openai" if self.embeddings.has_openai() else "none",
+            "image_source": "onnx" if self.image_embedder.enabled_onnx() else "none",
             "image_model_version": self.image_embedder.status().version,
         }
         render_status = self.renderer.status()

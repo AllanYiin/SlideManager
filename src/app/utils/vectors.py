@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 from typing import List
 
 import numpy as np
@@ -40,14 +39,8 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def stable_hash_to_vec(text: str, dim: int) -> np.ndarray:
-    """不依賴外部模型的退化向量：用 sha256 產生可重現的 float32 向量。"""
-    h = hashlib.sha256(text.encode("utf-8", errors="ignore")).digest()
-    out = np.zeros((dim,), dtype=np.float32)
-    # 以循環方式填充
-    for i in range(dim):
-        b = h[i % len(h)]
-        out[i] = (b / 255.0) * 2.0 - 1.0
-    return normalize_l2(out)
+    """保留測試介面：回傳零向量（不產生 mock 向量）。"""
+    return np.zeros((dim,), dtype=np.float32)
 
 
 def chunked(seq: List, n: int) -> List[List]:
