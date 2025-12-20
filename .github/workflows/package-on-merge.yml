@@ -1,0 +1,33 @@
+name: Package on PR Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  package:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf staging
+          mkdir -p staging
+          rsync -a --exclude '.git' --exclude '*.zip' ./ staging/
+
+          if [ -f staging/.env.example ]; then
+            cp staging/.env.example staging/.env
+            rm staging/.env.example
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: staging
