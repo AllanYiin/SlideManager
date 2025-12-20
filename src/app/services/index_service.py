@@ -66,6 +66,12 @@ class IndexService:
             if not indexed:
                 needed.append(f)
                 continue
+            if status:
+                text_indexed = status.get("text_indexed")
+                image_indexed = status.get("image_indexed")
+                if text_indexed is False or image_indexed is False:
+                    needed.append(f)
+                    continue
             mtime = int(f.get("modified_time") or 0)
             index_mtime = int(status.get("index_mtime_epoch") or 0)
             if mtime > index_mtime:
@@ -90,6 +96,8 @@ class IndexService:
         on_progress: Optional[Callable[[IndexProgress], None]] = None,
         cancel_flag: Optional[Callable[[], bool]] = None,
         pause_flag: Optional[Callable[[], bool]] = None,
+        update_text: bool = True,
+        update_image: bool = True,
     ) -> Tuple[int, str]:
         """索引指定檔案（增量）：先移除舊 entries，再寫入新 entries。"""
 
@@ -115,6 +123,12 @@ class IndexService:
 
         # 先移除要重建檔案的舊 slide
         target_paths = {f.get("abs_path") for f in files if f.get("abs_path")}
+        prev_entries: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        for s in slides:
+            file_path = s.get("file_path")
+            page = s.get("page")
+            if file_path in target_paths and isinstance(page, int):
+                prev_entries[(file_path, page)] = s
         slides = [s for s in slides if s.get("file_path") not in target_paths]
 
         total_files = len(files)
@@ -158,48 +172,77 @@ class IndexService:
                 progress("skip", fi, total_files, "檔案已變更，請重新掃描")
                 continue
 
-            progress("extract", fi, total_files, f"抽取文字：{pptx.name}")
-            slide_texts = self.extractor.extract(pptx)
+            slide_count = int(f.get("slide_count") or 0)
+
+            if update_text:
+                progress("extract", fi, total_files, f"抽取文字：{pptx.name}")
+                slide_texts = self.extractor.extract(pptx)
+            else:
+                slide_texts = []
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
             if not wait_if_paused(fi, total_files):
                 return 1, "已取消"
 
-            progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
-            rr = self.renderer.render_pptx(pptx, file_hash, slides_count=len(slide_texts))
-            render_message = rr.message
-            thumbs = rr.thumbs
-            if not rr.ok:
-                log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
-                progress("render", fi, total_files, rr.message)
+            if update_image:
+                progress("render", fi, total_files, f"產生縮圖：{pptx.name}")
+                rr = self.renderer.render_pptx(pptx, file_hash, slides_count=slide_count or len(slide_texts))
+                render_message = rr.message
+                thumbs = rr.thumbs
+                if not rr.ok:
+                    log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
+                    progress("render", fi, total_files, rr.message)
+            else:
+                thumbs = []
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
             if not wait_if_paused(fi, total_files):
                 return 1, "已取消"
 
-            if self.embeddings.has_openai():
+            if update_text and self.embeddings.has_openai():
                 progress("embed", fi, total_files, f"產生向量：{pptx.name}")
                 # text embeddings（分批）
                 all_texts = [st.all_text for st in slide_texts]
                 text_vecs = self.embeddings.embed_text_batch(all_texts)
-            else:
+            elif update_text:
                 progress("embed", fi, total_files, f"未設定 API Key，略過向量：{pptx.name}")
+                text_vecs = []
+            else:
                 text_vecs = []
 
             new_entries = []
-            for si, st in enumerate(slide_texts, start=1):
+            source_slide_count = len(slide_texts) if slide_texts else slide_count
+            slide_count = max(slide_count, source_slide_count)
+
+            if update_text and slide_texts:
+                slide_iter = enumerate(slide_texts, start=1)
+            else:
+                slide_iter = ((si, None) for si in range(1, slide_count + 1))
+
+            text_indexed_count = 0
+            image_indexed_count = 0
+            for si, st in slide_iter:
                 if cancel_flag and cancel_flag():
                     return 1, "已取消"
                 if not wait_if_paused(fi, total_files):
                     return 1, "已取消"
 
+                prev = prev_entries.get((abs_path, si))
+                prev_title = prev.get("title") if isinstance(prev, dict) else None
+                prev_body = prev.get("body") if isinstance(prev, dict) else None
+                prev_all_text = prev.get("all_text") if isinstance(prev, dict) else ""
+                prev_tokens = prev.get("bm25_tokens") if isinstance(prev, dict) else []
+                prev_text_vec = prev.get("text_vec") if isinstance(prev, dict) else None
+                prev_image_vec = prev.get("image_vec") if isinstance(prev, dict) else None
+                prev_thumb_path = prev.get("thumb_path") if isinstance(prev, dict) else None
+
                 thumb_path = str(thumbs[si - 1]) if si - 1 < len(thumbs) else None
                 img_vec_b64 = None
 
                 # 若縮圖存在且非空，做 image embedding（可退化）
-                if thumb_path:
+                if update_image and thumb_path:
                     try:
                         b = Path(thumb_path).read_bytes()
                         if b:
@@ -208,29 +251,60 @@ class IndexService:
                     except Exception:
                         img_vec_b64 = None
 
-                tv = text_vecs[si - 1] if si - 1 < len(text_vecs) else None
+                tv = None
+                if update_text and text_vecs and si - 1 < len(text_vecs):
+                    tv = text_vecs[si - 1]
                 tv_b64 = vec_to_b64_f32(tv) if tv is not None else None
 
                 has_text_vec = tv is not None
                 has_image_vec = img_vec_b64 is not None
-                if has_text_vec or has_image_vec:
-                    if has_text_vec:
+                if update_text and st is not None:
+                    text_indexed_count += 1
+                if update_image and has_image_vec:
+                    image_indexed_count += 1
+
+                if not update_text and prev_text_vec:
+                    tv_b64 = prev_text_vec
+                if not update_image and prev_image_vec:
+                    img_vec_b64 = prev_image_vec
+                if not update_image and not thumb_path and prev_thumb_path:
+                    thumb_path = prev_thumb_path
+
+                if has_text_vec or has_image_vec or tv_b64 or img_vec_b64:
+                    tv_concat = None
+                    iv_concat = None
+                    if tv is not None:
                         tv_concat = tv.astype(np.float32)
-                    else:
-                        tv_concat = np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
-                    if has_image_vec:
+                    elif tv_b64:
                         try:
-                            iv = np.frombuffer(base64.b64decode(img_vec_b64.encode("ascii")), dtype=np.float32)
+                            tv_concat = np.frombuffer(base64.b64decode(tv_b64.encode("ascii")), dtype=np.float32)
                         except Exception:
-                            iv = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
-                    else:
-                        iv = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
-                    concat = np.concatenate([tv_concat, iv.astype(np.float32)], axis=0)
+                            tv_concat = None
+                    if img_vec_b64:
+                        try:
+                            iv_concat = np.frombuffer(base64.b64decode(img_vec_b64.encode("ascii")), dtype=np.float32)
+                        except Exception:
+                            iv_concat = None
+                    if tv_concat is None:
+                        tv_concat = np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
+                    if iv_concat is None:
+                        iv_concat = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
+                    concat = np.concatenate([tv_concat, iv_concat.astype(np.float32)], axis=0)
                     concat_b64 = vec_to_b64_f32(concat)
                 else:
                     concat_b64 = None
 
                 slide_id = f"{f.get('file_id')}_{file_hash}_p{si:04d}"
+                if st is None:
+                    title = prev_title
+                    body = prev_body
+                    all_text = prev_all_text
+                    bm25_tokens = prev_tokens
+                else:
+                    title = st.title
+                    body = st.body
+                    all_text = st.all_text
+                    bm25_tokens = tokenize(st.all_text)
                 new_entries.append(
                     {
                         "slide_id": slide_id,
@@ -239,10 +313,10 @@ class IndexService:
                         "file_hash": file_hash,
                         "filename": pptx.name,
                         "page": si,
-                        "title": st.title,
-                        "body": st.body,
-                        "all_text": st.all_text,
-                        "bm25_tokens": tokenize(st.all_text),
+                        "title": title,
+                        "body": body,
+                        "all_text": all_text,
+                        "bm25_tokens": bm25_tokens,
                         "thumb_path": thumb_path,
                         "text_vec": tv_b64,
                         "image_vec": img_vec_b64,
@@ -267,7 +341,12 @@ class IndexService:
                 continue
 
             slides.extend(new_entries)
-            self.catalog.mark_indexed(abs_path, slides_count=len(slide_texts))
+            self.catalog.mark_indexed(
+                abs_path,
+                slides_count=slide_count,
+                text_indexed_count=text_indexed_count if update_text else None,
+                image_indexed_count=image_indexed_count if update_image else None,
+            )
 
         index["slides"] = slides
         index["embedding"] = {
