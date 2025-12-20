@@ -38,7 +38,16 @@ class CatalogService:
     def _load_whitelist(self) -> List[Dict[str, Any]]:
         proj = self.store.load_project()
         dirs = proj.get("whitelist_dirs", [])
-        return [d for d in dirs if isinstance(d, dict) and d.get("path")]
+        normalized: List[Dict[str, Any]] = []
+        for entry in dirs:
+            if isinstance(entry, str):
+                path = entry.strip()
+                if not path:
+                    continue
+                normalized.append({"path": path, "enabled": True, "recursive": True})
+            elif isinstance(entry, dict) and entry.get("path"):
+                normalized.append(entry)
+        return normalized
 
     def _save_whitelist(self, dirs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         proj = self.store.load_project()
