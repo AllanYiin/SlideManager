@@ -131,6 +131,13 @@ class ImageEmbeddingService:
     def status(self) -> ImageModelStatus:
         return self._status
 
+    def reload(self) -> ImageModelStatus:
+        """重新載入模型（下載完成後可呼叫）。"""
+
+        self._status = self._load_embedder()
+        self._write_metadata()
+        return self._status
+
     def enabled_onnx(self) -> bool:
         return bool(self._embedder and self._embedder.enabled_onnx())
 

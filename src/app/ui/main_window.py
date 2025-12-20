@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QStatusBar,
     QTabWidget,
     QToolBar,
@@ -22,9 +23,11 @@ from app.core.logging import get_logger
 from app.core.settings import AppSettings, load_settings, save_settings
 from app.services.catalog_service import CatalogService
 from app.services.index_service import IndexService
+from app.services.model_assets import ModelDownloadProgress, ensure_rerank_model
 from app.services.project_store import ProjectStore
 from app.services.search_service import SearchService
 from app.services.secrets_service import SecretsService
+from app.ui.async_worker import Worker
 from app.ui.tabs.chat_tab import ChatTab
 from app.ui.tabs.library_tab import LibraryTab
 from app.ui.tabs.search_tab import SearchTab
@@ -71,9 +74,16 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        self.model_download_prog = QProgressBar()
+        self.model_download_prog.setRange(0, 100)
+        self.model_download_prog.setValue(0)
+        self.model_download_prog.setVisible(False)
+        self.model_download_prog.setMaximumWidth(180)
+        self.status.addPermanentWidget(self.model_download_prog)
 
         self._build_menu()
         self._restore_window_state()
+        self._model_download_project_root: Optional[Path] = None
 
         # 嘗試自動開啟上次專案
         if self.settings.last_project_dir:
@@ -168,6 +178,7 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"已開啟專案：{project_root}")
             self.settings.last_project_dir = str(project_root)
             save_settings(self.settings)
+            self._ensure_image_model(project_root, store.paths.cache_dir)
         except Exception as e:
             QMessageBox.critical(self, "開啟專案失敗", f"發生錯誤：{e}")
 
@@ -186,3 +197,64 @@ class MainWindow(QMainWindow):
     def show_toast(self, message: str, *, level: str = "info", timeout_ms: int = 8000) -> None:
         toast = Toast(self, message, level=level, timeout_ms=timeout_ms)
         toast.show_toast()
+
+    def _ensure_image_model(self, project_root: Path, cache_dir: Path) -> None:
+        self._model_download_project_root = project_root
+
+        def task(_progress_emit):
+            def progress_hook(p: ModelDownloadProgress) -> None:
+                _progress_emit(p)
+
+            return ensure_rerank_model(cache_dir, on_progress=progress_hook)
+
+        w = Worker(task, None)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_model_progress)
+        w.signals.finished.connect(self._on_model_ready)
+        w.signals.error.connect(self._on_model_error)
+        self.thread_pool.start(w)
+
+    def _on_model_progress(self, p: object) -> None:
+        if not self.ctx or self._model_download_project_root != self.ctx.project_root:
+            return
+        try:
+            msg = getattr(p, "message", "")
+            cur = int(getattr(p, "current", 0))
+            total = int(getattr(p, "total", 0))
+            if total > 0:
+                percent = int(cur / total * 100)
+                msg = msg or f"下載圖片模型中... {percent}%"
+                self.model_download_prog.setRange(0, 100)
+                self.model_download_prog.setValue(percent)
+            if msg:
+                self.status.showMessage(msg)
+            if total <= 0:
+                self.model_download_prog.setRange(0, 0)
+            self.model_download_prog.setVisible(True)
+        except Exception:
+            pass
+
+    def _on_model_ready(self, model_path: object) -> None:
+        if not self.ctx or self._model_download_project_root != self.ctx.project_root:
+            return
+        try:
+            status = self.ctx.indexer.image_embedder.reload()
+            if status.available:
+                self.status.showMessage("圖片模型已就緒")
+                self.show_toast("圖片模型已就緒", level="info")
+            else:
+                self.status.showMessage("圖片模型載入失敗")
+                self.show_toast("圖片模型載入失敗，請查看 logs/app.log", level="error", timeout_ms=12000)
+            self.model_download_prog.setVisible(False)
+        except Exception as exc:
+            log.exception("更新圖片模型狀態失敗：%s", exc)
+            self.show_toast("更新圖片模型狀態失敗，請查看 logs/app.log", level="error", timeout_ms=12000)
+            self.model_download_prog.setVisible(False)
+
+    def _on_model_error(self, tb: str) -> None:
+        if not self.ctx or self._model_download_project_root != self.ctx.project_root:
+            return
+        log.error("圖片模型下載錯誤\n%s", tb)
+        self.status.showMessage("圖片模型下載失敗")
+        self.show_toast("圖片模型下載失敗，請查看 logs/app.log", level="error", timeout_ms=12000)
+        self.model_download_prog.setVisible(False)
