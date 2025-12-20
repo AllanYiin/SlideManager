@@ -327,6 +327,17 @@ class IndexService:
                         slides=file_slides,
                     )
                 )
+                self.catalog.mark_extracted(
+                    abs_path,
+                    slides_count=slide_count,
+                    index_mtime_epoch=start_mtime,
+                )
+                progress(
+                    "extracted",
+                    fi,
+                    overall_total,
+                    f"已擷取：{pptx.name}",
+                )
         finally:
             if update_image:
                 self.renderer.end_batch()

@@ -320,6 +320,42 @@ class CatalogService:
         cat["files"] = files
         self.store.save_catalog(cat)
 
+    def mark_extracted(
+        self,
+        abs_path: str,
+        slides_count: int,
+        *,
+        index_mtime_epoch: Optional[int] = None,
+    ) -> None:
+        cat = self.store.load_catalog()
+        files = cat.get("files", [])
+        now = int(time.time())
+        for e in files:
+            if isinstance(e, dict) and e.get("abs_path") == abs_path:
+                e["indexed"] = True
+                e["indexed_at"] = now
+                e["slides_count"] = int(slides_count)
+                mtime = index_mtime_epoch
+                if mtime is None:
+                    mtime = e.get("modified_time")
+                prev_status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
+                status = {
+                    "indexed": True,
+                    "indexed_epoch": now,
+                    "index_mtime_epoch": int(mtime) if mtime is not None else None,
+                    "index_slide_count": int(slides_count),
+                    "text_indexed_count": 0,
+                    "image_indexed_count": 0,
+                    "text_indexed": False,
+                    "image_indexed": False,
+                    "last_error": None,
+                }
+                if prev_status:
+                    status.update({k: v for k, v in prev_status.items() if k not in status})
+                e["index_status"] = status
+        cat["files"] = files
+        self.store.save_catalog(cat)
+
     def mark_unindexed(self, abs_path: str) -> None:
         cat = self.store.load_catalog()
         files = cat.get("files", [])
