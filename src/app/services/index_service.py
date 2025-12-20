@@ -48,7 +48,7 @@ class IndexService:
 
         self.extractor = ExtractionService()
         self.renderer = RenderService(self.store.paths.thumbs_dir)
-        self.image_embedder = ImageEmbedder(self.store.paths.cache_dir / "image_embedder.onnx", dim=self.emb_cfg.image_dim)
+        self.image_embedder = ImageEmbedder(self.store.paths.cache_dir / "rerankTexure.onnx", dim=self.emb_cfg.image_dim)
         self.embeddings = EmbeddingService(api_key, self.emb_cfg)
 
     def compute_needed_files(self) -> List[Dict[str, Any]]:

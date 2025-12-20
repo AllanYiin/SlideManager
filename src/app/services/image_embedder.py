@@ -2,78 +2,95 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
 from app.core.logging import get_logger
-from app.utils.vectors import normalize_l2
 
 log = get_logger(__name__)
 
+MODEL_INPUT_SIZE = 224
+
 
 class ImageEmbedder:
-    """圖片向量（2048 維）。
-
-    規格期待 onnxruntime + CNN ONNX；但為了確保「開箱即用」：
-    - 若 cache 內有模型檔（image_embedder.onnx）且能 import onnxruntime：就使用。
-    - 否則退化為 hash 向量（可重現、可用於相似度，但效果較差）。
-    """
+    """圖片向量（2048 維）。"""
 
     def __init__(self, model_path: Optional[Path] = None, dim: int = 2048):
         self.dim = int(dim)
         self.model_path = model_path
         self._ort_session = None
+        self.input_name = None
+        self.output_name = None
 
-        if model_path and model_path.exists():
-            try:
-                import onnxruntime as ort
+        if not model_path:
+            raise FileNotFoundError("找不到 ONNX 模型：未指定模型路徑")
+        if not model_path.exists():
+            raise FileNotFoundError(f"找不到 ONNX 模型: {model_path}")
+        try:
+            import onnxruntime as ort
 
-                self._ort_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-                log.info("ImageEmbedder：已載入 ONNX 模型：%s", model_path)
-            except Exception as e:
-                log.warning("ImageEmbedder：載入 ONNX 失敗，將使用退化 hash 向量：%s", e)
-                self._ort_session = None
+            self._ort_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+            self.input_name = self._ort_session.get_inputs()[0].name
+            self.output_name = self._ort_session.get_outputs()[0].name
+            log.info("ImageEmbedder：已載入 ONNX 模型：%s", model_path)
+        except Exception as exc:
+            log.exception("載入 ONNX 模型失敗 (%s): %s", model_path, exc)
+            raise RuntimeError("載入圖片模型失敗，檔案可能損毀，請重新下載 rerankTexure.onnx") from exc
 
     def enabled_onnx(self) -> bool:
         return self._ort_session is not None
 
     def embed_image_bytes(self, image_bytes: bytes) -> np.ndarray:
-        if self._ort_session:
+        try:
+            input_data = self._preprocess_image_bytes(image_bytes)
+            embedding = self._ort_session.run([self.output_name], {self.input_name: input_data})[0]
+            embedding = np.squeeze(embedding, axis=0).astype(np.float16)
+            return embedding
+        except Exception as exc:
+            log.exception("圖片嵌入失敗 (bytes): %s", exc)
+            return np.zeros((self.dim,), dtype=np.float16)
+
+    def embed_images(self, image_paths: List[Path]) -> np.ndarray:
+        if not image_paths:
+            return np.zeros((0, self.dim), dtype=np.float16)
+
+        outputs: List[np.ndarray] = []
+        for path in image_paths:
             try:
-                return self._embed_with_onnx(image_bytes)
-            except Exception as e:
-                log.warning("ONNX 取向量失敗，退回 hash：%s", e)
+                input_data = self._preprocess_image(path)
+                embedding = self._ort_session.run([self.output_name], {self.input_name: input_data})[0]
+                embedding = np.squeeze(embedding, axis=0).astype(np.float16)
+                outputs.append(embedding)
+            except Exception as exc:
+                log.exception("圖片嵌入失敗 (%s): %s", path, exc)
+                outputs.append(np.zeros((self.dim,), dtype=np.float16))
+        return np.vstack(outputs)
 
-        h = hashlib.sha256(image_bytes).digest()
-        out = np.zeros((self.dim,), dtype=np.float32)
-        for i in range(self.dim):
-            b = h[i % len(h)]
-            out[i] = (b / 255.0) * 2.0 - 1.0
-        return normalize_l2(out)
+    @staticmethod
+    def _preprocess_image(img_path: Path) -> np.ndarray:
+        from PIL import Image
 
-    def _embed_with_onnx(self, image_bytes: bytes) -> np.ndarray:
-        # 設計為「可插拔」：此處僅提供一個合理的預設前處理。
-        # 真正的 CNN 模型需與其訓練時的前處理一致。
+        with Image.open(img_path) as img:
+            img = img.convert("RGB")
+            if img.size != (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE):
+                img = img.resize((MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+            img_np = np.array(img).astype(np.float32)
+        img_np = (img_np - 127.5) / 127.5
+        img_np = img_np.transpose(2, 0, 1)
+        return np.expand_dims(img_np, axis=0)
+
+    @staticmethod
+    def _preprocess_image_bytes(image_bytes: bytes) -> np.ndarray:
         from PIL import Image
         import io
 
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img = img.resize((224, 224))
-        arr = np.asarray(img, dtype=np.float32) / 255.0
-        arr = np.transpose(arr, (2, 0, 1))[None, ...]  # NCHW
-
-        inp_name = self._ort_session.get_inputs()[0].name
-        out_name = self._ort_session.get_outputs()[0].name
-        vec = self._ort_session.run([out_name], {inp_name: arr})[0]
-        vec = np.asarray(vec, dtype=np.float32).reshape(-1)
-        if vec.size != self.dim:
-            # 容錯：截斷/補 0
-            if vec.size > self.dim:
-                vec = vec[: self.dim]
-            else:
-                pad = np.zeros((self.dim - vec.size,), dtype=np.float32)
-                vec = np.concatenate([vec, pad], axis=0)
-        return normalize_l2(vec)
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            if img.size != (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE):
+                img = img.resize((MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+            img_np = np.array(img).astype(np.float32)
+        img_np = (img_np - 127.5) / 127.5
+        img_np = img_np.transpose(2, 0, 1)
+        return np.expand_dims(img_np, axis=0)
