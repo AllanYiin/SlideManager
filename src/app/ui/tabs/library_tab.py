@@ -628,7 +628,7 @@ class LibraryTab(QWidget):
             self.prog_label.setText(display_msg)
             if msg:
                 self.main_window.status.showMessage(msg)
-            if stage in {"file_done", "skip"}:
+            if stage in {"file_done", "skip", "extracted"}:
                 self.refresh_table()
         except Exception:
             pass
