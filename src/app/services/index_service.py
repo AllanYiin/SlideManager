@@ -86,6 +86,16 @@ class IndexService:
         self.image_embedder = ImageEmbeddingService(self.store.paths.cache_dir, version="1")
         self.embeddings = EmbeddingService(api_key, self.emb_cfg, cache_dir=self.store.paths.cache_dir)
 
+    @staticmethod
+    def _resolve_index_mode(update_text: bool, update_image: bool) -> str:
+        if update_text and update_image:
+            return "both"
+        if update_text:
+            return "text_only"
+        if update_image:
+            return "image_only"
+        return "none"
+
     def compute_needed_files(self) -> List[Dict[str, Any]]:
         cat = self.store.load_catalog()
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
@@ -459,6 +469,7 @@ class IndexService:
             new_entries = []
             text_indexed_count = 0
             image_indexed_count = 0
+            bm25_indexed_count = 0
             for slide in fd.slides:
                 prev = prev_entries.get((slide.abs_path, slide.page))
                 prev_title = prev.get("title") if isinstance(prev, dict) else None
@@ -533,6 +544,19 @@ class IndexService:
                     bm25_tokens = bm25_tokens_by_index[slide.index]
                     if bm25_tokens is None:
                         bm25_tokens = tokenize(slide.slide_text.all_text) if slide.slide_text.all_text.strip() else []
+                text_status = "ok" if tv_b64 else "missing"
+                image_status = "ok" if img_vec_b64 else "missing"
+                bm25_status = (
+                    "ok"
+                    if isinstance(bm25_tokens, list) and len(bm25_tokens) > 0
+                    else "missing"
+                )
+                if text_status == "ok":
+                    text_indexed_count += 1
+                if image_status == "ok":
+                    image_indexed_count += 1
+                if bm25_status == "ok":
+                    bm25_indexed_count += 1
                 new_entries.append(
                     {
                         "slide_id": slide_id,
@@ -549,6 +573,9 @@ class IndexService:
                         "text_vec": tv_b64,
                         "image_vec": img_vec_b64,
                         "concat_vec": concat_b64,
+                        "text_index_status": text_status,
+                        "bm25_index_status": bm25_status,
+                        "image_index_status": image_status,
                         "indexed_at": int(time.time()),
                     }
                 )
@@ -574,6 +601,8 @@ class IndexService:
                 slides_count=fd.slide_count,
                 text_indexed_count=text_indexed_count if update_text else None,
                 image_indexed_count=image_indexed_count if update_image else None,
+                bm25_indexed_count=bm25_indexed_count if update_text else None,
+                index_mode=self._resolve_index_mode(update_text, update_image),
             )
             progress(
                 "file_done",

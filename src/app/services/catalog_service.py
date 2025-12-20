@@ -273,6 +273,8 @@ class CatalogService:
         *,
         text_indexed_count: Optional[int] = None,
         image_indexed_count: Optional[int] = None,
+        bm25_indexed_count: Optional[int] = None,
+        index_mode: Optional[str] = None,
     ) -> None:
         cat = self.store.load_catalog()
         files = cat.get("files", [])
@@ -298,6 +300,19 @@ class CatalogService:
                     text_count = None
                 if isinstance(image_count, bool):
                     image_count = None
+                bm25_count = (
+                    int(bm25_indexed_count)
+                    if bm25_indexed_count is not None
+                    else prev_status.get("bm25_indexed_count")
+                )
+                if isinstance(bm25_count, bool):
+                    bm25_count = None
+                summary = {
+                    "slides_ok_text": text_count if isinstance(text_count, int) else 0,
+                    "slides_ok_image": image_count if isinstance(image_count, int) else 0,
+                    "slides_ok_bm25": bm25_count if isinstance(bm25_count, int) else 0,
+                    "slides_error": 0,
+                }
                 e["index_status"] = {
                     "indexed": True,
                     "indexed_epoch": now,
@@ -305,6 +320,7 @@ class CatalogService:
                     "index_slide_count": int(slides_count),
                     "text_indexed_count": text_count,
                     "image_indexed_count": image_count,
+                    "bm25_indexed_count": bm25_count,
                     "text_indexed": (
                         text_count >= int(slides_count)
                         if isinstance(text_count, int)
@@ -315,6 +331,8 @@ class CatalogService:
                         if isinstance(image_count, int)
                         else prev_status.get("image_indexed", None)
                     ),
+                    "index_mode": index_mode or prev_status.get("index_mode"),
+                    "last_index_summary": summary,
                     "last_error": None,
                 }
         cat["files"] = files
@@ -346,8 +364,16 @@ class CatalogService:
                     "index_slide_count": int(slides_count),
                     "text_indexed_count": 0,
                     "image_indexed_count": 0,
+                    "bm25_indexed_count": 0,
                     "text_indexed": False,
                     "image_indexed": False,
+                    "index_mode": "none",
+                    "last_index_summary": {
+                        "slides_ok_text": 0,
+                        "slides_ok_image": 0,
+                        "slides_ok_bm25": 0,
+                        "slides_error": 0,
+                    },
                     "last_error": None,
                 }
                 if prev_status:
@@ -371,8 +397,16 @@ class CatalogService:
                     "index_slide_count": 0,
                     "text_indexed_count": 0,
                     "image_indexed_count": 0,
+                    "bm25_indexed_count": 0,
                     "text_indexed": False,
                     "image_indexed": False,
+                    "index_mode": "none",
+                    "last_index_summary": {
+                        "slides_ok_text": 0,
+                        "slides_ok_image": 0,
+                        "slides_ok_bm25": 0,
+                        "slides_error": 0,
+                    },
                     "last_error": None,
                 }
         cat["files"] = files
@@ -396,8 +430,16 @@ class CatalogService:
                         "index_slide_count": 0,
                         "text_indexed_count": 0,
                         "image_indexed_count": 0,
+                        "bm25_indexed_count": 0,
                         "text_indexed": False,
                         "image_indexed": False,
+                        "index_mode": "none",
+                        "last_index_summary": {
+                            "slides_ok_text": 0,
+                            "slides_ok_image": 0,
+                            "slides_ok_bm25": 0,
+                            "slides_error": 0,
+                        },
                         "last_error": {"code": code, "message": message, "time": now},
                     }
                 )

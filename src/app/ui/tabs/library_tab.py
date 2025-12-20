@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QComboBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from app.core.logging import get_logger
 from app.ui.async_worker import Worker
+from app.ui.metrics import STATUS_LABELS, classify_doc_status
 
 log = get_logger(__name__)
 
@@ -107,6 +109,21 @@ class LibraryTab(QWidget):
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("輸入檔名關鍵字")
         filter_row.addWidget(self.filter_edit)
+        self.status_filter = QComboBox()
+        self.status_filter.addItem("全部狀態", None)
+        self.status_filter.addItem("待索引", "pending")
+        self.status_filter.addItem("已索引", "indexed")
+        self.status_filter.addItem("已過期", "stale")
+        self.status_filter.addItem("部分索引", "partial")
+        self.status_filter.addItem("錯誤", "error")
+        filter_row.addWidget(self.status_filter)
+        self.coverage_filter = QComboBox()
+        self.coverage_filter.addItem("全部覆蓋", None)
+        self.coverage_filter.addItem("文字未覆蓋", "text_missing")
+        self.coverage_filter.addItem("BM25 未覆蓋", "bm25_missing")
+        self.coverage_filter.addItem("圖像未覆蓋", "image_missing")
+        self.coverage_filter.addItem("融合未完整", "fusion_missing")
+        filter_row.addWidget(self.coverage_filter)
         right_layout.addLayout(filter_row)
 
         self.table = QTableWidget(0, 6)
@@ -151,6 +168,8 @@ class LibraryTab(QWidget):
         self.btn_pause.clicked.connect(self.toggle_pause_indexing)
         self.btn_cancel.clicked.connect(self.cancel_indexing)
         self.filter_edit.textChanged.connect(self.refresh_table)
+        self.status_filter.currentIndexChanged.connect(self.refresh_table)
+        self.coverage_filter.currentIndexChanged.connect(self.refresh_table)
 
     def set_context(self, ctx) -> None:
         self.ctx = ctx
@@ -264,6 +283,8 @@ class LibraryTab(QWidget):
         self._scan_count = 0
         self.refresh_table()
         self.refresh_dirs()
+        if hasattr(self.main_window, "dashboard_tab"):
+            self.main_window.dashboard_tab.refresh_metrics()
         cat = self.ctx.store.load_catalog() if self.ctx else {}
         scan_errors = cat.get("scan_errors") if isinstance(cat, dict) else None
         if scan_errors:
@@ -306,6 +327,12 @@ class LibraryTab(QWidget):
         kw = (self.filter_edit.text() or "").strip().lower()
         if kw:
             files = [f for f in files if kw in (f.get("filename", "").lower())]
+        status_filter = self.status_filter.currentData()
+        if status_filter:
+            files = [f for f in files if classify_doc_status(f) == status_filter]
+        coverage_filter = self.coverage_filter.currentData()
+        if coverage_filter:
+            files = [f for f in files if self._match_coverage_filter(f, coverage_filter)]
 
         sorting_enabled = self.table.isSortingEnabled()
         if sorting_enabled:
@@ -355,41 +382,47 @@ class LibraryTab(QWidget):
             it = SortableItem(str(val), sort_keys[c])
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
             it.setToolTip(tooltip)
-            if status == "已索引":
-                it.setBackground(QColor("#E8F5E9"))
-            self.table.setItem(r, c, it)
+        if status == "已索引":
+            it.setBackground(QColor("#E8F5E9"))
+        self.table.setItem(r, c, it)
 
     def _status_text(self, f: Dict[str, Any]) -> str:
-        if f.get("missing"):
-            return "未處理"
+        return STATUS_LABELS.get(classify_doc_status(f), "未處理")
+
+    def _match_coverage_filter(self, f: Dict[str, Any], coverage: str) -> bool:
         status = f.get("index_status") if isinstance(f.get("index_status"), dict) else {}
-        if status.get("last_error"):
-            return "未處理"
-        indexed = bool(status.get("indexed")) if status else bool(f.get("indexed"))
-        if not indexed:
-            return "未處理"
-        mtime = int(f.get("modified_time") or 0)
-        index_mtime = int(status.get("index_mtime_epoch") or 0)
         slide_count = f.get("slide_count")
-        index_slide_count = status.get("index_slide_count")
-        if mtime > index_mtime:
-            return "已擷取"
-        if slide_count is not None and index_slide_count is not None:
-            try:
-                if int(slide_count) != int(index_slide_count):
-                    return "已擷取"
-            except Exception:
-                return "已擷取"
-        if status:
-            text_indexed = status.get("text_indexed")
-            image_indexed = status.get("image_indexed")
-            if text_indexed is True and image_indexed is True:
-                return "已索引"
-            if text_indexed is False and image_indexed is False:
-                return "已擷取"
-            if text_indexed is not None or image_indexed is not None:
-                return "部分索引"
-        return "已擷取"
+        if slide_count is None:
+            slide_count = status.get("index_slide_count") or f.get("slides_count")
+        try:
+            slide_total = int(slide_count) if slide_count is not None else 0
+        except Exception:
+            slide_total = 0
+        if slide_total <= 0:
+            return False
+        text_count = status.get("text_indexed_count")
+        image_count = status.get("image_indexed_count")
+        if coverage in {"text_missing", "bm25_missing"}:
+            return isinstance(text_count, int) and text_count < slide_total
+        if coverage == "image_missing":
+            return isinstance(image_count, int) and image_count < slide_total
+        if coverage == "fusion_missing":
+            return (
+                isinstance(text_count, int)
+                and isinstance(image_count, int)
+                and (text_count < slide_total or image_count < slide_total)
+            )
+        return False
+
+    def apply_status_filter(self, status: str | None) -> None:
+        idx = self.status_filter.findData(status)
+        self.status_filter.setCurrentIndex(idx if idx != -1 else 0)
+        self.refresh_table()
+
+    def apply_coverage_filter(self, coverage: str | None) -> None:
+        idx = self.coverage_filter.findData(coverage)
+        self.coverage_filter.setCurrentIndex(idx if idx != -1 else 0)
+        self.refresh_table()
 
     def selected_files(self) -> List[Dict[str, Any]]:
         if not self.ctx:
@@ -630,6 +663,8 @@ class LibraryTab(QWidget):
                 self.main_window.status.showMessage(msg)
             if stage in {"file_done", "skip", "extracted"}:
                 self.refresh_table()
+                if hasattr(self.main_window, "dashboard_tab"):
+                    self.main_window.dashboard_tab.refresh_metrics()
         except Exception:
             pass
 
@@ -654,6 +689,8 @@ class LibraryTab(QWidget):
         self.btn_index_selected.setEnabled(True)
         self.refresh_table()
         self.refresh_dirs()
+        if hasattr(self.main_window, "dashboard_tab"):
+            self.main_window.dashboard_tab.refresh_metrics()
 
         try:
             code, msg = result
