@@ -78,10 +78,13 @@ class ProjectStore:
             }
         if "whitelist_dirs" not in data or not isinstance(data["whitelist_dirs"], list):
             data["whitelist_dirs"] = []
-        migrated = []
+        migrated: List[Any] = []
         for entry in data.get("whitelist_dirs", []):
             if isinstance(entry, str):
-                migrated.append({"path": entry, "enabled": True, "recursive": True})
+                path = entry.strip()
+                if not path:
+                    continue
+                migrated.append(path)
             elif isinstance(entry, dict):
                 path = str(entry.get("path", "")).strip()
                 if not path:
