@@ -581,9 +581,23 @@ class LibraryTab(QWidget):
             stage = getattr(p, "stage", "")
             cur = int(getattr(p, "current", 0))
             total = int(getattr(p, "total", 0))
+            avg_page_time = getattr(p, "avg_page_time", None)
+            avg_extract_time = getattr(p, "avg_extract_time", None)
+            avg_render_time = getattr(p, "avg_render_time", None)
             if total > 0:
                 self.prog.setValue(int(cur / total * 100))
-            self.prog_label.setText(msg or "索引中...")
+            metrics = []
+            if avg_page_time is not None:
+                metrics.append(f"平均每頁 {avg_page_time:.2f} 秒")
+            if avg_extract_time is not None:
+                metrics.append(f"文字抽取平均 {avg_extract_time:.2f} 秒/頁")
+            if avg_render_time is not None:
+                metrics.append(f"縮圖截取平均 {avg_render_time:.2f} 秒/頁")
+            if metrics:
+                display_msg = f"{msg or '索引中...'}\n" + " | ".join(metrics)
+            else:
+                display_msg = msg or "索引中..."
+            self.prog_label.setText(display_msg)
             if msg:
                 self.main_window.status.showMessage(msg)
             if stage in {"file_done", "skip"}:

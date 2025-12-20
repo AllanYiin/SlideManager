@@ -31,6 +31,12 @@ class IndexProgress:
     current: int
     total: int
     message: str
+    avg_page_time: Optional[float] = None
+    avg_extract_time: Optional[float] = None
+    avg_render_time: Optional[float] = None
+    pages_indexed: int = 0
+    extract_pages: int = 0
+    render_pages: int = 0
 
 
 @dataclass
@@ -128,9 +134,44 @@ class IndexService:
     ) -> Tuple[int, str]:
         """索引指定檔案（增量）：先移除舊 entries，再寫入新 entries。"""
 
+        overall_start = time.perf_counter()
+        processed_pages = 0
+        extract_pages = 0
+        render_pages = 0
+        extract_time = 0.0
+        render_time = 0.0
+
+        def build_metrics() -> Dict[str, Any]:
+            elapsed = time.perf_counter() - overall_start
+            avg_page_time = elapsed / processed_pages if processed_pages > 0 else None
+            avg_extract_time = extract_time / extract_pages if extract_pages > 0 else None
+            avg_render_time = render_time / render_pages if render_pages > 0 else None
+            return {
+                "avg_page_time": avg_page_time,
+                "avg_extract_time": avg_extract_time,
+                "avg_render_time": avg_render_time,
+                "pages_indexed": processed_pages,
+                "extract_pages": extract_pages,
+                "render_pages": render_pages,
+            }
+
         def progress(stage: str, cur: int, total: int, msg: str) -> None:
             if on_progress:
-                on_progress(IndexProgress(stage=stage, current=cur, total=total, message=msg))
+                metrics = build_metrics()
+                on_progress(
+                    IndexProgress(
+                        stage=stage,
+                        current=cur,
+                        total=total,
+                        message=msg,
+                        avg_page_time=metrics["avg_page_time"],
+                        avg_extract_time=metrics["avg_extract_time"],
+                        avg_render_time=metrics["avg_render_time"],
+                        pages_indexed=metrics["pages_indexed"],
+                        extract_pages=metrics["extract_pages"],
+                        render_pages=metrics["render_pages"],
+                    )
+                )
 
         def wait_if_paused(cur: int, total: int) -> bool:
             if not pause_flag:
@@ -213,9 +254,12 @@ class IndexService:
 
                 if update_text:
                     progress("extract", fi, overall_total, f"抽取文字：{pptx.name}")
+                    extract_start = time.perf_counter()
                     slide_texts = self.extractor.extract(pptx)
+                    extract_elapsed = time.perf_counter() - extract_start
                 else:
                     slide_texts = []
+                    extract_elapsed = 0.0
 
                 if cancel_flag and cancel_flag():
                     return 1, "已取消"
@@ -224,7 +268,9 @@ class IndexService:
 
                 if update_image:
                     progress("render", fi, overall_total, f"產生縮圖：{pptx.name}")
+                    render_start = time.perf_counter()
                     rr = self.renderer.render_pptx(pptx, file_hash, slides_count=slide_count or len(slide_texts))
+                    render_elapsed = time.perf_counter() - render_start
                     render_message = rr.message
                     thumbs = rr.thumbs
                     if not rr.ok:
@@ -232,6 +278,7 @@ class IndexService:
                         progress("render", fi, overall_total, rr.message)
                 else:
                     thumbs = []
+                    render_elapsed = 0.0
 
                 if cancel_flag and cancel_flag():
                     return 1, "已取消"
@@ -240,6 +287,14 @@ class IndexService:
 
                 source_slide_count = len(slide_texts) if slide_texts else slide_count
                 slide_count = max(slide_count, source_slide_count)
+                if update_text and extract_elapsed > 0 and slide_count > 0:
+                    extract_time += extract_elapsed
+                    extract_pages += slide_count
+                if update_image and render_elapsed > 0 and slide_count > 0:
+                    render_time += render_elapsed
+                    render_pages += slide_count
+                if slide_count > 0:
+                    processed_pages += slide_count
                 file_slides: List[SlideWork] = []
                 if update_text and slide_texts:
                     slide_iter = enumerate(slide_texts, start=1)
