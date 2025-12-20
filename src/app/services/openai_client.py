@@ -49,6 +49,7 @@ class OpenAIClient:
         temperature: float,
         max_output_tokens: int,
         timeout: float,
+        cancel_event: Optional[threading.Event] = None,
     ) -> AsyncGenerator[str, None]:
         """Responses API streaming（async generator 包裝）。"""
 
@@ -67,6 +68,8 @@ class OpenAIClient:
                     timeout=timeout,
                 )
                 for event in stream:
+                    if cancel_event and cancel_event.is_set():
+                        break
                     etype = getattr(event, "type", "") or ""
                     # 依官方文件概念：output_text delta
                     if "output_text" in etype and "delta" in etype:

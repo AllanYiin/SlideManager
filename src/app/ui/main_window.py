@@ -125,6 +125,9 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, idx: int) -> None:
         self.settings.last_tab_index = int(idx)
+        if self.tabs.widget(idx) is self.settings_tab and self.ctx:
+            self.settings_tab.refresh_whitelist()
+            self.settings_tab.refresh_diagnostics()
 
     # -------- Actions --------
     def action_open_project(self) -> None:

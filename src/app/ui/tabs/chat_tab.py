@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List
+import threading
+from typing import Any, Dict, List, Optional
 
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -30,6 +31,8 @@ class ChatTab(QWidget):
         self.ctx = None
         self._messages: List[Dict[str, Any]] = []
         self._current_assistant_buf = ""
+        self._cancel_event: Optional[threading.Event] = None
+        self._streaming = False
 
         root = QVBoxLayout(self)
 
@@ -44,9 +47,13 @@ class ChatTab(QWidget):
         row.addWidget(self.input)
         self.btn_send = QPushButton("送出")
         row.addWidget(self.btn_send)
+        self.btn_cancel = QPushButton("取消串流")
+        self.btn_cancel.setEnabled(False)
+        row.addWidget(self.btn_cancel)
         root.addLayout(row)
 
         self.btn_send.clicked.connect(self.send)
+        self.btn_cancel.clicked.connect(self.cancel_stream)
         self.input.returnPressed.connect(self.send)
 
     def set_context(self, ctx) -> None:
@@ -58,6 +65,9 @@ class ChatTab(QWidget):
     def send(self) -> None:
         if not self.ctx:
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
+            return
+        if self._streaming:
+            QMessageBox.information(self, "正在回覆中", "請等待目前串流完成，或按下「取消串流」。")
             return
 
         text = (self.input.text() or "").strip()
@@ -107,7 +117,10 @@ class ChatTab(QWidget):
 
     def _start_stream(self, messages: List[Dict[str, Any]]):
         self.btn_send.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self._streaming = True
         self._current_assistant_buf = ""
+        self._cancel_event = threading.Event()
         self.transcript.append("\n助理：")
 
         def task(_progress_emit):
@@ -122,6 +135,7 @@ class ChatTab(QWidget):
                     temperature=0.4,
                     max_output_tokens=1024,
                     timeout=60.0,
+                    cancel_event=self._cancel_event,
                 ):
                     _progress_emit(delta)
 
@@ -139,6 +153,8 @@ class ChatTab(QWidget):
         self.main_window.thread_pool.start(w)
 
     def _on_stream_delta(self, delta: object) -> None:
+        if self._cancel_event and self._cancel_event.is_set():
+            return
         d = str(delta)
         self._current_assistant_buf += d
         self.transcript.moveCursor(self.transcript.textCursor().End)
@@ -147,6 +163,12 @@ class ChatTab(QWidget):
 
     def _on_stream_done(self, result: object) -> None:
         self.btn_send.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self._streaming = False
+        cancelled = bool(self._cancel_event and self._cancel_event.is_set())
+        if cancelled:
+            self.transcript.append("\n（已取消串流）")
+        self._cancel_event = None
         # 保存到 messages
         final = self._current_assistant_buf.strip()
         if final:
@@ -156,6 +178,14 @@ class ChatTab(QWidget):
         log.error("Chat 背景任務錯誤\n%s", tb)
         QMessageBox.critical(self, "發生錯誤", "發生錯誤。請複製以下訊息並發送給您的 AI 助手：\n\n" + tb)
         self.btn_send.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self._streaming = False
+        self._cancel_event = None
+
+    def cancel_stream(self) -> None:
+        if self._cancel_event and not self._cancel_event.is_set():
+            self._cancel_event.set()
+            self.btn_cancel.setEnabled(False)
 
     def _append_user(self, text: str) -> None:
         self.transcript.append(f"\n使用者：{text}\n")
