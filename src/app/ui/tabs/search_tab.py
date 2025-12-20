@@ -158,7 +158,9 @@ class SearchTab(QWidget):
                 return
             try:
                 b = self._image_path.read_bytes()
-                image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(b)
+                image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
+                    b, dim=self.ctx.indexer.emb_cfg.image_dim
+                )
             except Exception as e:
                 QMessageBox.critical(self, "讀取圖片失敗", f"{e}")
                 return

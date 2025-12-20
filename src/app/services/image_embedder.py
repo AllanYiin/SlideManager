@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import List, Optional
 
@@ -80,6 +82,67 @@ class ImageEmbedder:
         img_np = (img_np - 127.5) / 127.5
         img_np = img_np.transpose(2, 0, 1)
         return np.expand_dims(img_np, axis=0)
+
+
+@dataclass
+class ImageModelStatus:
+    model_path: Path
+    version: str
+    available: bool
+    detail: str
+
+
+class ImageEmbeddingService:
+    """圖片向量服務（支援模型快取/版本與退化）。"""
+
+    def __init__(self, cache_dir: Path, *, model_name: str = "rerankTexure.onnx", version: str = "1"):
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.model_path = self.cache_dir / model_name
+        self.version = version
+        self._embedder: Optional[ImageEmbedder] = None
+        self._status = self._load_embedder()
+        self._write_metadata()
+
+    def _load_embedder(self) -> ImageModelStatus:
+        if not self.model_path.exists():
+            log.warning("找不到圖片模型：%s", self.model_path)
+            return ImageModelStatus(self.model_path, self.version, False, "找不到模型檔案")
+        try:
+            self._embedder = ImageEmbedder(self.model_path)
+            return ImageModelStatus(self.model_path, self.version, True, "已載入模型")
+        except Exception as exc:
+            log.error("圖片模型載入失敗：%s", exc)
+            return ImageModelStatus(self.model_path, self.version, False, "模型載入失敗")
+
+    def _write_metadata(self) -> None:
+        meta = {
+            "model_path": str(self.model_path),
+            "version": self.version,
+            "available": self._status.available,
+            "detail": self._status.detail,
+        }
+        meta_path = self.cache_dir / "image_model.json"
+        try:
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            log.warning("寫入模型狀態失敗：%s", exc)
+
+    def status(self) -> ImageModelStatus:
+        return self._status
+
+    def enabled_onnx(self) -> bool:
+        return bool(self._embedder and self._embedder.enabled_onnx())
+
+    def embed_image_bytes(self, image_bytes: bytes, *, dim: int) -> np.ndarray:
+        if not self._embedder:
+            return np.zeros((dim,), dtype=np.float32)
+        return self._embedder.embed_image_bytes(image_bytes).astype(np.float32)
+
+    def embed_images(self, image_paths: List[Path], *, dim: int) -> np.ndarray:
+        if not self._embedder:
+            return np.zeros((len(image_paths), dim), dtype=np.float32)
+        return self._embedder.embed_images(image_paths).astype(np.float32)
 
     @staticmethod
     def _preprocess_image_bytes(image_bytes: bytes) -> np.ndarray:

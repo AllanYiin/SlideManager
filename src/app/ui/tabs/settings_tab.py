@@ -139,8 +139,16 @@ class SettingsTab(QWidget):
         lines.append(f"image_source：{emb.get('image_source')}")
         lines.append("")
         lines.append("[Renderer]")
-        lines.append(f"LibreOffice soffice：{self.ctx.indexer.renderer.soffice_path() or '未偵測'}")
+        render_status = self.ctx.indexer.renderer.status()
+        lines.append(f"Renderer 可用：{'是' if render_status.get('available') else '否'}")
+        lines.append(f"Renderer 使用中：{render_status.get('active')}")
+        status_map = render_status.get('status') or {}
+        lines.append(f"LibreOffice：{status_map.get('libreoffice')}")
+        lines.append(f"Windows COM：{status_map.get('windows_com')}")
+        model_status = self.ctx.indexer.image_embedder.status()
         lines.append(f"ONNX 啟用：{'是' if self.ctx.indexer.image_embedder.enabled_onnx() else '否（退化 hash）'}")
+        lines.append(f"圖片模型版本：{model_status.version}")
+        lines.append(f"圖片模型狀態：{model_status.detail}")
         lines.append("")
         lines.append("提示：若未設定 API Key，向量搜尋仍可用，但品質較差（fallback_hash）。")
 
