@@ -10,3 +10,4 @@ pillow
 pyside6
 python-pptx
 rank-bm25
+requests
