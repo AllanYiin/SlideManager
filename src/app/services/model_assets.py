@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -62,20 +63,36 @@ def _download_from_google_drive(
     *,
     on_progress: Optional[Callable[[ModelDownloadProgress], None]] = None,
 ) -> Path:
-    url = "https://drive.usercontent.google.com/uc"
+    url = "https://drive.google.com/uc"
     params = {"id": file_id, "export": "download"}
     session = requests.Session()
 
-    response = session.get(url, params=params, stream=True, timeout=30)
+    try:
+        response = session.get(url, params=params, stream=True, timeout=30)
+    except requests.RequestException as exc:
+        log.exception("Google Drive 下載請求失敗：%s", exc)
+        raise RuntimeError("Google Drive 下載請求失敗") from exc
+
     if response.status_code != 200:
         raise RuntimeError(f"Google Drive 回應碼 {response.status_code}")
 
     token = _get_confirm_token(response)
+    if not token and _is_html_response(response):
+        token = _extract_confirm_token_from_html(response.text)
+        if not token:
+            raise RuntimeError("Google Drive 回傳警示頁面，請確認檔案分享權限")
+
     if token:
         params["confirm"] = token
-        response = session.get(url, params=params, stream=True, timeout=30)
+        try:
+            response = session.get(url, params=params, stream=True, timeout=30)
+        except requests.RequestException as exc:
+            log.exception("Google Drive 確認下載請求失敗：%s", exc)
+            raise RuntimeError("Google Drive 確認下載請求失敗") from exc
         if response.status_code != 200:
             raise RuntimeError(f"確認後下載仍失敗，回應碼 {response.status_code}")
+        if _is_html_response(response):
+            raise RuntimeError("Google Drive 仍回傳警示頁面，請確認檔案分享權限")
 
     total = int(response.headers.get("Content-Length") or 0)
     downloaded = 0
@@ -115,6 +132,18 @@ def _get_confirm_token(response: requests.Response) -> Optional[str]:
         if key.startswith("download_warning"):
             return value
     return None
+
+
+def _extract_confirm_token_from_html(html: str) -> Optional[str]:
+    match = re.search(r"confirm=([0-9A-Za-z_-]+)", html)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _is_html_response(response: requests.Response) -> bool:
+    content_type = response.headers.get("Content-Type", "").lower()
+    return "text/html" in content_type
 
 
 def _emit_progress(
