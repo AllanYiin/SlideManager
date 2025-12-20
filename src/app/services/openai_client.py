@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -21,14 +23,36 @@ class OpenAIConfig:
     timeout: float = 60.0
 
 
+class _RateLimiter:
+    def __init__(self, rpm: int):
+        self._rpm = max(int(rpm), 1)
+        self._min_interval = 60.0 / float(self._rpm)
+        self._lock = threading.Lock()
+        self._last_time = 0.0
+
+    def wait(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                wait_for = (self._last_time + self._min_interval) - now
+                if wait_for <= 0:
+                    self._last_time = now
+                    return
+            time.sleep(min(wait_for, self._min_interval))
+
+
 class OpenAIClient:
     def __init__(self, api_key: str):
         from openai import OpenAI
 
         self._client = OpenAI(api_key=api_key)
+        rpm = int(os.getenv("OPENAI_RPM", "50") or 50)
+        self._rate_limiter = _RateLimiter(rpm) if rpm > 0 else None
 
     def embed_texts(self, texts: List[str], model: str) -> List[List[float]]:
         """同步 embeddings。"""
+        if self._rate_limiter:
+            self._rate_limiter.wait()
         resp = self._client.embeddings.create(
             model=model,
             input=texts,
@@ -59,6 +83,8 @@ class OpenAIClient:
 
         def worker():
             try:
+                if self._rate_limiter:
+                    self._rate_limiter.wait()
                 stream = self._client.responses.create(
                     model=model,
                     input=messages,
