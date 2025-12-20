@@ -29,16 +29,8 @@ jobs:
           fi
 
 
-      - name: Create zip archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd staging
-          zip -r ../release-package.zip . -x "*.zip"
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-package
-
-          path: release-package.zip
-
+          path: staging
