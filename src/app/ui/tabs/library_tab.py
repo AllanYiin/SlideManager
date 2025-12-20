@@ -402,28 +402,98 @@ class LibraryTab(QWidget):
     def start_index_needed(self) -> None:
         if not self.ctx:
             return
-        self.ctx.catalog.scan()
-        files = self.ctx.indexer.compute_needed_files()
+        self._set_last_action("準備索引（需要者）", lambda: self.start_index_needed())
+        self._prepare_index_needed()
+
+    def start_index_selected(self) -> None:
+        if not self.ctx:
+            return
+        files = self.selected_files()
         if not files:
+            QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
+            return
+        selected_paths = [f.get("abs_path") for f in files if f.get("abs_path")]
+        if not selected_paths:
+            QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
+            return
+        self._set_last_action("準備索引（選取檔案）", lambda: self.start_index_selected())
+        self._prepare_index_selected(selected_paths)
+
+    def _set_prepare_ui(self, label: str) -> None:
+        self.btn_index_needed.setEnabled(False)
+        self.btn_index_selected.setEnabled(False)
+        self.btn_cancel.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("暫停")
+        self.prog.setRange(0, 0)
+        self.prog.setValue(0)
+        self.prog_label.setText(label)
+        if hasattr(self.main_window, "status"):
+            self.main_window.status.showMessage(label)
+
+    def _reset_prepare_ui(self) -> None:
+        self.prog.setRange(0, 100)
+        self.prog.setValue(0)
+        self.prog_label.setText("")
+        self.btn_index_needed.setEnabled(True)
+        self.btn_index_selected.setEnabled(True)
+
+    def _prepare_index_needed(self) -> None:
+        if not self.ctx:
+            return
+        self._set_prepare_ui("正在掃描並整理索引需求...")
+
+        def task():
+            self.ctx.catalog.scan()
+            return self.ctx.indexer.compute_needed_files()
+
+        w = Worker(task, None)
+        w.signals.finished.connect(self._on_prepare_index_needed_done)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_prepare_index_needed_done(self, files: List[Dict[str, Any]]) -> None:
+        if not files:
+            self._reset_prepare_ui()
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
             return
         mode = self._choose_index_mode()
         if not mode:
+            self._reset_prepare_ui()
             return
         update_text, update_image = mode
         self._set_last_action("開始索引（需要者）", lambda: self._start_index(files, update_text, update_image))
         self._start_index(files, update_text, update_image)
 
-    def start_index_selected(self) -> None:
+    def _prepare_index_selected(self, selected_paths: List[str]) -> None:
         if not self.ctx:
             return
-        self.ctx.catalog.scan()
-        files = self.selected_files()
+        self._set_prepare_ui("正在掃描並整理選取檔案...")
+
+        def task():
+            self.ctx.catalog.scan()
+            cat = self.ctx.store.load_catalog()
+            files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+            selected = []
+            for entry in files:
+                path = entry.get("abs_path")
+                if path and path in selected_paths:
+                    selected.append(entry)
+            return selected
+
+        w = Worker(task, None)
+        w.signals.finished.connect(self._on_prepare_index_selected_done)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_prepare_index_selected_done(self, files: List[Dict[str, Any]]) -> None:
         if not files:
-            QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
+            self._reset_prepare_ui()
+            QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
         mode = self._choose_index_mode()
         if not mode:
+            self._reset_prepare_ui()
             return
         update_text, update_image = mode
         self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files, update_text, update_image))
