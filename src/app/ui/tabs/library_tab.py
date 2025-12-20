@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -326,6 +327,8 @@ class LibraryTab(QWidget):
             it = QTableWidgetItem(str(val))
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
             it.setToolTip(tooltip)
+            if status == "已索引":
+                it.setBackground(QColor("#E8F5E9"))
             self.table.setItem(r, c, it)
 
     def _status_text(self, f: Dict[str, Any]) -> str:
@@ -505,6 +508,7 @@ class LibraryTab(QWidget):
     def _on_index_progress(self, p: object) -> None:
         try:
             msg = getattr(p, "message", "")
+            stage = getattr(p, "stage", "")
             cur = int(getattr(p, "current", 0))
             total = int(getattr(p, "total", 0))
             if total > 0:
@@ -512,6 +516,8 @@ class LibraryTab(QWidget):
             self.prog_label.setText(msg or "索引中...")
             if msg:
                 self.main_window.status.showMessage(msg)
+            if stage in {"file_done", "skip"}:
+                self.refresh_table()
         except Exception:
             pass
 

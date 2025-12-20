@@ -347,6 +347,7 @@ class IndexService:
                 text_indexed_count=text_indexed_count if update_text else None,
                 image_indexed_count=image_indexed_count if update_image else None,
             )
+            progress("file_done", fi, total_files, f"已更新索引：{pptx.name}")
 
         index["slides"] = slides
         index["embedding"] = {
