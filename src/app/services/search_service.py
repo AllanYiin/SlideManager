@@ -20,7 +20,7 @@ log = get_logger(__name__)
 @dataclass
 class SearchQuery:
     text: str
-    mode: str = "hybrid"  # hybrid | bm25 | vector_text | vector_image | vector_concat
+    mode: str = "hybrid"  # text | image | overall | hybrid | bm25
     weight_text: float = 0.5
     weight_vector: float = 0.5
     top_k: int = 50
@@ -57,15 +57,24 @@ class SearchService:
 
         # Vector
         vec_scores = [0.0] * len(slides)
-        if q.mode in {"hybrid", "vector_text", "vector_concat"}:
-            qv = self.embeddings.embed_text(q.text)
-            vec_scores = self._vector_scores(slides, qv, use_concat=(q.mode == "vector_concat"))
-        elif q.mode == "vector_image" and image_vec is not None:
+        qv_text: Optional[np.ndarray] = None
+        if q.mode in {"text", "hybrid", "overall"}:
+            qv_text = self.embeddings.embed_text(q.text)
+
+        if q.mode == "text" and qv_text is not None:
+            vec_scores = self._vector_scores(slides, qv_text, use_concat=False)
+        elif q.mode == "overall":
+            qv_concat = self._build_concat_query(qv_text, image_vec)
+            vec_scores = self._vector_scores(slides, qv_concat, use_concat=True)
+        elif q.mode == "hybrid":
+            qv_concat = self._build_concat_query(qv_text, image_vec)
+            vec_scores = self._vector_scores(slides, qv_concat, use_concat=True)
+        elif q.mode == "image" and image_vec is not None:
             vec_scores = self._vector_scores(slides, image_vec, use_concat=False, use_image=True)
 
         # Normalize
         bm_n = self._minmax_norm(bm25_scores)
-        vec_n = self._minmax_norm(vec_scores)
+        vec_n = self._cosine_norm(vec_scores)
 
         results: List[SearchResult] = []
         for i, s in enumerate(slides):
@@ -73,7 +82,7 @@ class SearchService:
             vc = vec_n[i]
             if q.mode == "bm25":
                 score = bm
-            elif q.mode.startswith("vector"):
+            elif q.mode in {"image", "overall"}:
                 score = vc
             else:
                 score = q.weight_text * bm + q.weight_vector * vc
@@ -144,3 +153,19 @@ class SearchService:
         if abs(mx - mn) < 1e-9:
             return [0.0 for _ in xs]
         return [(x - mn) / (mx - mn) for x in xs]
+
+    def _cosine_norm(self, xs: List[float]) -> List[float]:
+        if not xs:
+            return []
+        return [max(0.0, min(1.0, (x + 1.0) / 2.0)) for x in xs]
+
+    def _build_concat_query(
+        self,
+        text_vec: Optional[np.ndarray],
+        image_vec: Optional[np.ndarray],
+    ) -> np.ndarray:
+        if text_vec is None:
+            text_vec = np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
+        if image_vec is None:
+            image_vec = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
+        return np.concatenate([text_vec, image_vec], axis=0)

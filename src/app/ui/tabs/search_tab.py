@@ -59,7 +59,10 @@ class SearchTab(QWidget):
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("模式："))
         self.mode = QComboBox()
-        self.mode.addItems(["hybrid", "bm25", "vector_text", "vector_concat", "vector_image"])
+        self.mode.addItem("文字（BM25 + 向量）", "text")
+        self.mode.addItem("圖片（向量）", "image")
+        self.mode.addItem("整體（文字+圖片向量）", "overall")
+        self.mode.addItem("混合（BM25 + 整體向量）", "hybrid")
         row2.addWidget(self.mode)
 
         row2.addWidget(QLabel("Hybrid 權重（文字→向量）："))
@@ -137,11 +140,12 @@ class SearchTab(QWidget):
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
             return
         text = (self.query_edit.text() or "").strip()
-        if not text and self.mode.currentText() != "vector_image":
+        mode = self.mode.currentData() or self.mode.currentText()
+        if not text and mode != "image":
             QMessageBox.information(self, "缺少查詢", "請輸入文字查詢")
             return
 
-        m = self.mode.currentText()
+        m = mode
         wv = self.weight.value() / 100.0
         q = SearchQuery(
             text=text,
@@ -152,7 +156,7 @@ class SearchTab(QWidget):
         )
 
         image_vec = None
-        if m == "vector_image":
+        if m == "image":
             if not self._image_path or not self._image_path.exists():
                 QMessageBox.information(self, "未選擇圖片", "請先選擇一張圖片")
                 return
@@ -164,6 +168,14 @@ class SearchTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "讀取圖片失敗", f"{e}")
                 return
+        elif self._image_path and self._image_path.exists():
+            try:
+                b = self._image_path.read_bytes()
+                image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
+                    b, dim=self.ctx.indexer.emb_cfg.image_dim
+                )
+            except Exception:
+                image_vec = None
 
         results = self.ctx.search.search(q, image_vec=image_vec)
         self._last_results = results
