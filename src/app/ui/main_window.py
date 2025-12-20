@@ -29,6 +29,7 @@ from app.services.search_service import SearchService
 from app.services.secrets_service import SecretsService
 from app.ui.async_worker import Worker
 from app.ui.tabs.chat_tab import ChatTab
+from app.ui.tabs.dashboard_tab import DashboardTab
 from app.ui.tabs.library_tab import LibraryTab
 from app.ui.tabs.search_tab import SearchTab
 from app.ui.tabs.settings_tab import SettingsTab
@@ -63,10 +64,12 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self.library_tab = LibraryTab(self)
+        self.dashboard_tab = DashboardTab(self)
         self.search_tab = SearchTab(self)
         self.chat_tab = ChatTab(self)
         self.settings_tab = SettingsTab(self)
 
+        self.tabs.addTab(self.dashboard_tab, "Dashboard")
         self.tabs.addTab(self.library_tab, "檔案庫/索引")
         self.tabs.addTab(self.search_tab, "搜尋")
         self.tabs.addTab(self.chat_tab, "對話")
@@ -139,6 +142,8 @@ class MainWindow(QMainWindow):
         if self.tabs.widget(idx) is self.settings_tab and self.ctx:
             self.settings_tab.refresh_whitelist()
             self.settings_tab.refresh_diagnostics()
+        if self.tabs.widget(idx) is self.dashboard_tab and self.ctx:
+            self.dashboard_tab.refresh_metrics()
 
     # -------- Actions --------
     def action_open_project(self) -> None:
@@ -171,6 +176,7 @@ class MainWindow(QMainWindow):
 
             # 通知各 tab
             self.library_tab.set_context(self.ctx)
+            self.dashboard_tab.set_context(self.ctx)
             self.search_tab.set_context(self.ctx)
             self.chat_tab.set_context(self.ctx)
             self.settings_tab.set_context(self.ctx)
