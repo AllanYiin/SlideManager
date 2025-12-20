@@ -8,7 +8,7 @@ onnxruntime
 openai
 pillow
 pyside6
-pdf2image
+pymupdf
 pywin32
 python-pptx
 rank-bm25
