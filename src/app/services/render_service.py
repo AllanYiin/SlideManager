@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
-from typing import List, Protocol
+from typing import List, Protocol, Tuple
 
 from app.core.logging import get_logger
 
@@ -141,6 +141,29 @@ class RenderService:
     def _thumb_path(self, file_hash: str, page: int) -> Path:
         return self.thumbs_dir / f"{file_hash}_p{page:04d}.png"
 
+    @staticmethod
+    def _target_thumb_size(size: Tuple[int, int]) -> Tuple[int, int]:
+        width, height = size
+        if height <= 0 or width <= 0:
+            return (320, 240)
+        ratio = width / height
+        ratio_4_3 = 4 / 3
+        ratio_16_9 = 16 / 9
+        if abs(ratio - ratio_4_3) <= abs(ratio - ratio_16_9):
+            return (320, 240)
+        return (320, 180)
+
+    def _resize_thumb(self, src: Path, dst: Path) -> bool:
+        from PIL import Image
+
+        with Image.open(src) as img:
+            img = img.convert("RGB")
+            target = self._target_thumb_size(img.size)
+            if img.size != target:
+                img.thumbnail(target, Image.LANCZOS)
+            img.save(dst, format="PNG", optimize=True)
+        return True
+
     def _render_with_renderer(self, renderer: Renderer, pptx_path: Path, file_hash: str) -> List[Path]:
         with tempfile.TemporaryDirectory() as td:
             outdir = Path(td)
@@ -149,8 +172,10 @@ class RenderService:
             for idx, src in enumerate(pngs, start=1):
                 dst = self._thumb_path(file_hash, idx)
                 try:
-                    dst.write_bytes(src.read_bytes())
+                    if not self._resize_thumb(src, dst):
+                        continue
                     thumbs.append(dst)
-                except Exception:
+                except Exception as exc:
+                    log.warning("[THUMB_RESIZE_ERROR] 縮圖處理失敗 (%s): %s", src, exc)
                     continue
             return thumbs
