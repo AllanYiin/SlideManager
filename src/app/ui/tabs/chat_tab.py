@@ -6,6 +6,7 @@ import asyncio
 import threading
 from typing import Any, Dict, List, Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -176,7 +177,16 @@ class ChatTab(QWidget):
 
     def _on_error(self, tb: str) -> None:
         log.error("Chat 背景任務錯誤\n%s", tb)
-        QMessageBox.critical(self, "發生錯誤", "發生錯誤。請複製以下訊息並發送給您的 AI 助手：\n\n" + tb)
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast("對話背景任務發生錯誤，已寫入 logs/app.log。", level="error", timeout_ms=12000)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle("發生錯誤")
+        box.setText("對話背景任務發生錯誤，已寫入 logs/app.log。您可以重試或提供詳細資訊。")
+        box.setDetailedText(tb)
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        box.setStandardButtons(QMessageBox.Close)
+        box.exec()
         self.btn_send.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self._streaming = False

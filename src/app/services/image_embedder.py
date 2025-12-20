@@ -38,7 +38,7 @@ class ImageEmbedder:
             self.output_name = self._ort_session.get_outputs()[0].name
             log.info("ImageEmbedder：已載入 ONNX 模型：%s", model_path)
         except Exception as exc:
-            log.exception("載入 ONNX 模型失敗 (%s): %s", model_path, exc)
+            log.exception("[ONNX_ERROR] 載入 ONNX 模型失敗 (%s): %s", model_path, exc)
             raise RuntimeError("載入圖片模型失敗，檔案可能損毀，請重新下載 rerankTexure.onnx") from exc
 
     def enabled_onnx(self) -> bool:
@@ -51,7 +51,7 @@ class ImageEmbedder:
             embedding = np.squeeze(embedding, axis=0).astype(np.float16)
             return embedding
         except Exception as exc:
-            log.exception("圖片嵌入失敗 (bytes): %s", exc)
+            log.exception("[ONNX_ERROR] 圖片嵌入失敗 (bytes): %s", exc)
             return np.zeros((self.dim,), dtype=np.float16)
 
     def embed_images(self, image_paths: List[Path]) -> np.ndarray:
@@ -66,7 +66,7 @@ class ImageEmbedder:
                 embedding = np.squeeze(embedding, axis=0).astype(np.float16)
                 outputs.append(embedding)
             except Exception as exc:
-                log.exception("圖片嵌入失敗 (%s): %s", path, exc)
+                log.exception("[ONNX_ERROR] 圖片嵌入失敗 (%s): %s", path, exc)
                 outputs.append(np.zeros((self.dim,), dtype=np.float16))
         return np.vstack(outputs)
 
@@ -112,7 +112,7 @@ class ImageEmbeddingService:
             self._embedder = ImageEmbedder(self.model_path)
             return ImageModelStatus(self.model_path, self.version, True, "已載入模型")
         except Exception as exc:
-            log.error("圖片模型載入失敗：%s", exc)
+            log.error("[ONNX_ERROR] 圖片模型載入失敗：%s", exc)
             return ImageModelStatus(self.model_path, self.version, False, "模型載入失敗")
 
     def _write_metadata(self) -> None:

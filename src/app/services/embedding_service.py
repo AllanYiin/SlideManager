@@ -120,9 +120,10 @@ class EmbeddingService:
             try:
                 return self._client.embed_texts(texts, self.cfg.text_model)
             except Exception as exc:
-                log.warning("OpenAI embeddings 失敗（第 %s 次）：%s", attempt, exc)
+                log.warning("[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s", attempt, exc)
                 if attempt < len(delays):
                     time.sleep(delay)
+        log.error("[OPENAI_ERROR] OpenAI embeddings 最終失敗，改用 fallback 向量")
         return []
 
     def _align_dim(self, v: np.ndarray) -> np.ndarray:

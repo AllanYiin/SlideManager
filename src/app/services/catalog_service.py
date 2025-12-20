@@ -95,6 +95,7 @@ class CatalogService:
         existing = self.store.load_catalog().get("files", [])
         by_path = {e.get("abs_path"): e for e in existing if isinstance(e, dict) and e.get("abs_path")}
         touched_paths = set()
+        scan_errors: List[Dict[str, Any]] = []
 
         files: List[Dict[str, Any]] = []
         for entry in whitelist:
@@ -102,69 +103,106 @@ class CatalogService:
                 continue
             root = Path(str(entry.get("path")))
             if not root.exists():
+                scan_errors.append(
+                    {
+                        "code": "PATH_NOT_FOUND",
+                        "path": str(root),
+                        "message": "白名單路徑不存在，已略過",
+                    }
+                )
+                log.warning("[PATH_NOT_FOUND] 白名單路徑不存在：%s", root)
+                continue
+            if not os.access(root, os.R_OK):
+                scan_errors.append(
+                    {
+                        "code": "PERMISSION_DENIED",
+                        "path": str(root),
+                        "message": "白名單路徑權限不足，已略過",
+                    }
+                )
+                log.warning("[PERMISSION_DENIED] 白名單路徑權限不足：%s", root)
                 continue
             walker = root.rglob("*.pptx") if entry.get("recursive", True) else root.glob("*.pptx")
-            for path in walker:
-                try:
-                    st = path.stat()
-                    abs_path = str(path.resolve())
-                    prev = by_path.get(abs_path)
-                    touched_paths.add(abs_path)
+            try:
+                for path in walker:
+                    try:
+                        st = path.stat()
+                        abs_path = str(path.resolve())
+                        prev = by_path.get(abs_path)
+                        touched_paths.add(abs_path)
 
-                    # 快速判斷是否需要重算 hash
-                    mtime = int(st.st_mtime)
-                    size = int(st.st_size)
-                    file_hash = None
-                    if prev and int(prev.get("size", -1)) == size and int(prev.get("modified_time", -1)) == mtime:
-                        file_hash = prev.get("file_hash")
-                    if not file_hash:
-                        file_hash = _sha256_file(path)
+                        # 快速判斷是否需要重算 hash
+                        mtime = int(st.st_mtime)
+                        size = int(st.st_size)
+                        file_hash = None
+                        if prev and int(prev.get("size", -1)) == size and int(prev.get("modified_time", -1)) == mtime:
+                            file_hash = prev.get("file_hash")
+                        if not file_hash:
+                            file_hash = _sha256_file(path)
 
-                    file_id = hashlib.sha256(abs_path.encode("utf-8", errors="ignore")).hexdigest()
-                    core_props = prev.get("core_properties") if prev else None
-                    slide_count = prev.get("slide_count") if prev else None
-                    if prev and (prev.get("metadata_mtime") != mtime or prev.get("metadata_size") != size):
-                        core_props = None
-                        slide_count = None
-                    if core_props is None or slide_count is None:
-                        try:
-                            meta = read_pptx_metadata(path)
-                            core_props = meta.get("core_properties")
-                            slide_count = meta.get("slide_count")
-                        except Exception as e:
-                            log.warning("讀取 metadata 失敗：%s (%s)", path, e)
+                        file_id = hashlib.sha256(abs_path.encode("utf-8", errors="ignore")).hexdigest()
+                        core_props = prev.get("core_properties") if prev else None
+                        slide_count = prev.get("slide_count") if prev else None
+                        if prev and (prev.get("metadata_mtime") != mtime or prev.get("metadata_size") != size):
+                            core_props = None
+                            slide_count = None
+                        if core_props is None or slide_count is None:
+                            try:
+                                meta = read_pptx_metadata(path)
+                                core_props = meta.get("core_properties")
+                                slide_count = meta.get("slide_count")
+                            except Exception as e:
+                                log.warning("讀取 metadata 失敗：%s (%s)", path, e)
 
-                    index_status = prev.get("index_status") if prev else None
-                    if not index_status and prev:
-                        indexed = bool(prev.get("indexed"))
-                        index_status = {
-                            "indexed": indexed,
-                            "indexed_epoch": prev.get("indexed_at"),
-                            "index_mtime_epoch": prev.get("modified_time") if indexed else None,
-                            "index_slide_count": prev.get("slides_count") if indexed else 0,
-                            "last_error": None,
+                        index_status = prev.get("index_status") if prev else None
+                        if not index_status and prev:
+                            indexed = bool(prev.get("indexed"))
+                            index_status = {
+                                "indexed": indexed,
+                                "indexed_epoch": prev.get("indexed_at"),
+                                "index_mtime_epoch": prev.get("modified_time") if indexed else None,
+                                "index_slide_count": prev.get("slides_count") if indexed else 0,
+                                "last_error": None,
+                            }
+
+                        entry = {
+                            "file_id": file_id,
+                            "abs_path": abs_path,
+                            "filename": path.name,
+                            "size": size,
+                            "modified_time": mtime,
+                            "file_hash": file_hash,
+                            "metadata_size": size,
+                            "metadata_mtime": mtime,
+                            "core_properties": core_props,
+                            "slide_count": slide_count,
+                            "indexed": bool(prev.get("indexed")) if prev else False,
+                            "indexed_at": prev.get("indexed_at") if prev else None,
+                            "slides_count": int(prev.get("slides_count", 0)) if prev else 0,
+                            "index_status": index_status,
+                            "missing": False,
                         }
-
-                    entry = {
-                        "file_id": file_id,
-                        "abs_path": abs_path,
-                        "filename": path.name,
-                        "size": size,
-                        "modified_time": mtime,
-                        "file_hash": file_hash,
-                        "metadata_size": size,
-                        "metadata_mtime": mtime,
-                        "core_properties": core_props,
-                        "slide_count": slide_count,
-                        "indexed": bool(prev.get("indexed")) if prev else False,
-                        "indexed_at": prev.get("indexed_at") if prev else None,
-                        "slides_count": int(prev.get("slides_count", 0)) if prev else 0,
-                        "index_status": index_status,
-                        "missing": False,
+                        files.append(entry)
+                    except PermissionError as e:
+                        scan_errors.append(
+                            {
+                                "code": "PERMISSION_DENIED",
+                                "path": str(path),
+                                "message": "掃描檔案權限不足，已略過",
+                            }
+                        )
+                        log.warning("[PERMISSION_DENIED] 掃描檔案失敗：%s (%s)", path, e)
+                    except Exception as e:
+                        log.warning("掃描檔案失敗：%s (%s)", path, e)
+            except PermissionError as e:
+                scan_errors.append(
+                    {
+                        "code": "PERMISSION_DENIED",
+                        "path": str(root),
+                        "message": "白名單路徑權限不足，已略過",
                     }
-                    files.append(entry)
-                except Exception as e:
-                    log.warning("掃描檔案失敗：%s (%s)", path, e)
+                )
+                log.warning("[PERMISSION_DENIED] 讀取目錄失敗：%s (%s)", root, e)
 
         # 標記 missing
         for prev in existing:
@@ -181,6 +219,7 @@ class CatalogService:
             "files": sorted(files, key=lambda x: (x.get("filename", ""), x.get("abs_path", ""))),
             "scanned_at": int(time.time()),
             "whitelist_dirs": whitelist,
+            "scan_errors": scan_errors,
         }
         self.store.save_catalog(out)
         return out
@@ -220,6 +259,29 @@ class CatalogService:
                     "index_slide_count": 0,
                     "last_error": None,
                 }
+        cat["files"] = files
+        self.store.save_catalog(cat)
+
+    def mark_index_error(self, abs_path: str, code: str, message: str) -> None:
+        cat = self.store.load_catalog()
+        files = cat.get("files", [])
+        now = int(time.time())
+        for e in files:
+            if isinstance(e, dict) and e.get("abs_path") == abs_path:
+                e["indexed"] = False
+                e["indexed_at"] = None
+                e["slides_count"] = 0
+                status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
+                status.update(
+                    {
+                        "indexed": False,
+                        "indexed_epoch": None,
+                        "index_mtime_epoch": None,
+                        "index_slide_count": 0,
+                        "last_error": {"code": code, "message": message, "time": now},
+                    }
+                )
+                e["index_status"] = status
         cat["files"] = files
         self.store.save_catalog(cat)
 

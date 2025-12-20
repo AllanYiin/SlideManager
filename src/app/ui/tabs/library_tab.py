@@ -40,6 +40,8 @@ class LibraryTab(QWidget):
 
         self._cancel_index = False
         self._pause_index = False
+        self._last_action = None
+        self._last_action_label = ""
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -200,6 +202,7 @@ class LibraryTab(QWidget):
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
             return
 
+        self._set_last_action("掃描檔案", self.scan_files)
         self.prog_label.setText("掃描中...")
         self.prog.setRange(0, 0)
 
@@ -217,6 +220,34 @@ class LibraryTab(QWidget):
         self.prog_label.setText("掃描完成")
         self.refresh_table()
         self.refresh_dirs()
+        cat = self.ctx.store.load_catalog() if self.ctx else {}
+        scan_errors = cat.get("scan_errors") if isinstance(cat, dict) else None
+        if scan_errors:
+            lines = []
+            for err in scan_errors:
+                if not isinstance(err, dict):
+                    continue
+                code = err.get("code", "")
+                path = err.get("path", "")
+                msg = err.get("message", "")
+                lines.append(f"[{code}] {path}：{msg}")
+            detail = "\n".join(lines)
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(
+                    "掃描完成，但部分路徑無法存取，已略過（可查看詳細資訊）。",
+                    level="warning",
+                    timeout_ms=12000,
+                )
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("掃描完成（部分路徑無法存取）")
+            box.setText("部分白名單路徑無法存取，已略過。您可以調整權限或路徑後重試。")
+            box.setDetailedText(detail)
+            box.setStandardButtons(QMessageBox.Retry | QMessageBox.Close)
+            box.setDefaultButton(QMessageBox.Retry)
+            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            if box.exec() == QMessageBox.Retry:
+                self.scan_files()
 
     # ---------- table ----------
     def refresh_table(self) -> None:
@@ -258,6 +289,8 @@ class LibraryTab(QWidget):
         if f.get("missing"):
             return "缺失"
         status = f.get("index_status") if isinstance(f.get("index_status"), dict) else {}
+        if status.get("last_error"):
+            return "索引錯誤"
         indexed = bool(status.get("indexed")) if status else bool(f.get("indexed"))
         if not indexed:
             return "未索引"
@@ -298,6 +331,7 @@ class LibraryTab(QWidget):
         if not files:
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
             return
+        self._set_last_action("開始索引（需要者）", lambda: self._start_index(files))
         self._start_index(files)
 
     def start_index_selected(self) -> None:
@@ -308,6 +342,7 @@ class LibraryTab(QWidget):
         if not files:
             QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
             return
+        self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files))
         self._start_index(files)
 
     def _start_index(self, files: List[Dict[str, Any]]):
@@ -395,13 +430,28 @@ class LibraryTab(QWidget):
 
     def _on_error(self, tb: str) -> None:
         log.error("背景任務錯誤\n%s", tb)
-        QMessageBox.critical(self, "發生錯誤", "發生錯誤。請複製以下訊息並發送給您的 AI 助手：\n\n" + tb)
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast("背景任務發生錯誤，已寫入 logs/app.log。", level="error", timeout_ms=12000)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle("發生錯誤")
+        box.setText("背景任務發生錯誤，已寫入 logs/app.log。您可以重試或將詳細資訊提供給支援人員。")
+        box.setDetailedText(tb)
+        box.setStandardButtons(QMessageBox.Retry | QMessageBox.Close)
+        box.setDefaultButton(QMessageBox.Retry)
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        if box.exec() == QMessageBox.Retry and self._last_action:
+            self._last_action()
         self.btn_cancel.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("暫停")
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self.prog_label.setText("發生錯誤")
+
+    def _set_last_action(self, label: str, action) -> None:
+        self._last_action_label = label
+        self._last_action = action
 
     def clear_missing_files(self) -> None:
         if not self.ctx:

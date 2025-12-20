@@ -135,7 +135,7 @@ class RenderService:
                 return RenderResult(ok=True, thumbs=thumbs, message=f"已使用 {renderer.name} 渲染縮圖")
             return RenderResult(ok=False, thumbs=[], message=f"{renderer.name} 未產生縮圖，已改為純文字索引")
         except Exception as e:
-            log.warning("Renderer 失敗（%s）：%s", renderer.name, e)
+            log.warning("[RENDERER_ERROR] Renderer 失敗（%s）：%s", renderer.name, e)
             return RenderResult(ok=False, thumbs=[], message=f"{renderer.name} 渲染失敗，已改為純文字索引")
 
     def _thumb_path(self, file_hash: str, page: int) -> Path:
