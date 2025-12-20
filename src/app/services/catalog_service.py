@@ -259,7 +259,14 @@ class CatalogService:
         self.store.save_catalog(out)
         return out
 
-    def mark_indexed(self, abs_path: str, slides_count: int) -> None:
+    def mark_indexed(
+        self,
+        abs_path: str,
+        slides_count: int,
+        *,
+        text_indexed_count: Optional[int] = None,
+        image_indexed_count: Optional[int] = None,
+    ) -> None:
         cat = self.store.load_catalog()
         files = cat.get("files", [])
         now = int(time.time())
@@ -269,11 +276,38 @@ class CatalogService:
                 e["indexed_at"] = now
                 e["slides_count"] = int(slides_count)
                 mtime = e.get("modified_time")
+                prev_status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
+                text_count = (
+                    int(text_indexed_count)
+                    if text_indexed_count is not None
+                    else prev_status.get("text_indexed_count")
+                )
+                image_count = (
+                    int(image_indexed_count)
+                    if image_indexed_count is not None
+                    else prev_status.get("image_indexed_count")
+                )
+                if isinstance(text_count, bool):
+                    text_count = None
+                if isinstance(image_count, bool):
+                    image_count = None
                 e["index_status"] = {
                     "indexed": True,
                     "indexed_epoch": now,
                     "index_mtime_epoch": int(mtime) if mtime is not None else None,
                     "index_slide_count": int(slides_count),
+                    "text_indexed_count": text_count,
+                    "image_indexed_count": image_count,
+                    "text_indexed": (
+                        text_count >= int(slides_count)
+                        if isinstance(text_count, int)
+                        else prev_status.get("text_indexed", None)
+                    ),
+                    "image_indexed": (
+                        image_count >= int(slides_count)
+                        if isinstance(image_count, int)
+                        else prev_status.get("image_indexed", None)
+                    ),
                     "last_error": None,
                 }
         cat["files"] = files
@@ -292,6 +326,10 @@ class CatalogService:
                     "indexed_epoch": None,
                     "index_mtime_epoch": None,
                     "index_slide_count": 0,
+                    "text_indexed_count": 0,
+                    "image_indexed_count": 0,
+                    "text_indexed": False,
+                    "image_indexed": False,
                     "last_error": None,
                 }
         cat["files"] = files
@@ -313,6 +351,10 @@ class CatalogService:
                         "indexed_epoch": None,
                         "index_mtime_epoch": None,
                         "index_slide_count": 0,
+                        "text_indexed_count": 0,
+                        "image_indexed_count": 0,
+                        "text_indexed": False,
+                        "image_indexed": False,
                         "last_error": {"code": code, "message": message, "time": now},
                     }
                 )
