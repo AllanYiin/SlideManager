@@ -38,5 +38,10 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b))
 
 
+def stable_hash_to_vec(text: str, dim: int) -> np.ndarray:
+    """保留測試介面：回傳零向量（不產生 mock 向量）。"""
+    return np.zeros((dim,), dtype=np.float32)
+
+
 def chunked(seq: List, n: int) -> List[List]:
     return [seq[i : i + n] for i in range(0, len(seq), n)]
