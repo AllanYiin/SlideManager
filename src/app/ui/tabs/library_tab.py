@@ -427,7 +427,7 @@ class LibraryTab(QWidget):
         self._start_index(files, update_text, update_image)
 
 
-    def _start_index(self, files: List[Dict[str, Any]]):
+    def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool) -> None:
         render_status = None
         try:
             render_status = self.ctx.indexer.renderer.status()
