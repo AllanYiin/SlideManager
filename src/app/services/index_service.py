@@ -346,10 +346,14 @@ class IndexService:
 
         text_indices: List[int] = []
         text_payload: List[str] = []
+        empty_text_indices: List[int] = []
         for slide in all_slides:
             if update_text and slide.slide_text is not None:
-                text_indices.append(slide.index)
-                text_payload.append(slide.slide_text.all_text)
+                if slide.slide_text.all_text.strip():
+                    text_indices.append(slide.index)
+                    text_payload.append(slide.slide_text.all_text)
+                else:
+                    empty_text_indices.append(slide.index)
 
         image_indices: List[int] = []
         image_paths: List[Path] = []
@@ -412,6 +416,11 @@ class IndexService:
                         "未設定 API Key，略過文字向量",
                     )
 
+            if update_text and empty_text_indices:
+                for idx in empty_text_indices:
+                    text_vecs_by_index[idx] = np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
+                    bm25_tokens_by_index[idx] = []
+
             if bm25_future:
                 try:
                     tokens = bm25_future.result()
@@ -464,7 +473,7 @@ class IndexService:
 
                 has_text_vec = tv is not None
                 has_image_vec = img_vec_b64 is not None
-                if update_text and slide.slide_text is not None:
+                if update_text and slide.slide_text is not None and slide.slide_text.all_text.strip():
                     text_indexed_count += 1
                 if update_image and has_image_vec:
                     image_indexed_count += 1
@@ -510,7 +519,9 @@ class IndexService:
                     title = slide.slide_text.title
                     body = slide.slide_text.body
                     all_text = slide.slide_text.all_text
-                    bm25_tokens = bm25_tokens_by_index[slide.index] or tokenize(slide.slide_text.all_text)
+                    bm25_tokens = bm25_tokens_by_index[slide.index]
+                    if bm25_tokens is None:
+                        bm25_tokens = tokenize(slide.slide_text.all_text) if slide.slide_text.all_text.strip() else []
                 new_entries.append(
                     {
                         "slide_id": slide_id,
