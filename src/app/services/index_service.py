@@ -145,6 +145,8 @@ class IndexService:
         """索引指定檔案（增量）：先移除舊 entries，再寫入新 entries。"""
 
         overall_start = time.perf_counter()
+        update_text_vectors = bool(update_text and self.embeddings.has_openai())
+        update_image_vectors = bool(update_image and self.image_embedder.enabled_onnx())
         processed_pages = 0
         extract_pages = 0
         render_pages = 0
@@ -379,7 +381,7 @@ class IndexService:
         image_indices: List[int] = []
         image_paths: List[Path] = []
         for slide in all_slides:
-            if update_image and slide.thumb_path:
+            if update_image_vectors and slide.thumb_path:
                 image_indices.append(slide.index)
                 image_paths.append(Path(slide.thumb_path))
 
@@ -411,7 +413,7 @@ class IndexService:
                     batch_size=16,
                 )
 
-            if update_text and self.embeddings.has_openai() and text_payload:
+            if update_text_vectors and text_payload:
                 progress(
                     "embed_text",
                     text_progress or total_files,
@@ -483,26 +485,26 @@ class IndexService:
                 thumb_path = slide.thumb_path
                 img_vec_b64 = None
 
-                if update_image and slide.index < len(image_vecs_by_index):
+                if update_image_vectors and slide.index < len(image_vecs_by_index):
                     img_vec = image_vecs_by_index[slide.index]
                     if img_vec is not None:
                         img_vec_b64 = vec_to_b64_f32(img_vec)
 
                 tv = None
-                if update_text and slide.index < len(text_vecs_by_index):
+                if update_text_vectors and slide.index < len(text_vecs_by_index):
                     tv = text_vecs_by_index[slide.index]
                 tv_b64 = vec_to_b64_f32(tv) if tv is not None else None
 
                 has_text_vec = tv is not None
                 has_image_vec = img_vec_b64 is not None
-                if update_text and slide.slide_text is not None and slide.slide_text.all_text.strip():
+                if update_text_vectors and slide.slide_text is not None and slide.slide_text.all_text.strip():
                     text_indexed_count += 1
-                if update_image and has_image_vec:
+                if update_image_vectors and has_image_vec:
                     image_indexed_count += 1
 
-                if not update_text and prev_text_vec:
+                if not update_text_vectors and prev_text_vec:
                     tv_b64 = prev_text_vec
-                if not update_image and prev_image_vec:
+                if not update_image_vectors and prev_image_vec:
                     img_vec_b64 = prev_image_vec
                 if not update_image and not thumb_path and prev_thumb_path:
                     thumb_path = prev_thumb_path
@@ -599,10 +601,12 @@ class IndexService:
             self.catalog.mark_indexed(
                 fd.abs_path,
                 slides_count=fd.slide_count,
+
                 text_indexed_count=text_indexed_count if update_text else None,
                 image_indexed_count=image_indexed_count if update_image else None,
                 bm25_indexed_count=bm25_indexed_count if update_text else None,
                 index_mode=self._resolve_index_mode(update_text, update_image),
+
             )
             progress(
                 "file_done",
