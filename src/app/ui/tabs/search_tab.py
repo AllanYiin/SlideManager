@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 from PySide6.QtWidgets import QAbstractItemView
+from app.core.errors import ErrorCode, format_user_message
 from app.core.logging import get_logger
 from app.services.search_service import SearchQuery
 
@@ -157,6 +158,12 @@ class SearchTab(QWidget):
 
         image_vec = None
         if m == "image":
+            if not self.ctx.indexer.image_embedder.enabled_onnx():
+                msg = format_user_message(ErrorCode.ONNX_ERROR, detail="圖片模型不可用，無法進行以圖搜圖")
+                if hasattr(self.main_window, "show_toast"):
+                    self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+                QMessageBox.information(self, "圖片模型不可用", msg)
+                return
             if not self._image_path or not self._image_path.exists():
                 QMessageBox.information(self, "未選擇圖片", "請先選擇一張圖片")
                 return
@@ -166,7 +173,10 @@ class SearchTab(QWidget):
                     b, dim=self.ctx.indexer.emb_cfg.image_dim
                 )
             except Exception as e:
-                QMessageBox.critical(self, "讀取圖片失敗", f"{e}")
+                msg = f"讀取圖片失敗：{e}"
+                if hasattr(self.main_window, "show_toast"):
+                    self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+                QMessageBox.critical(self, "讀取圖片失敗", msg)
                 return
         elif self._image_path and self._image_path.exists():
             try:
@@ -247,4 +257,7 @@ class SearchTab(QWidget):
 
                 subprocess.Popen(["xdg-open", str(pp.parent)])
         except Exception as e:
-            QMessageBox.critical(self, "開啟失敗", f"{e}")
+            msg = f"開啟檔案位置失敗：{e}"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+            QMessageBox.critical(self, "開啟失敗", msg)

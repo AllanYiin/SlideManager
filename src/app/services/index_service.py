@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from app.core.errors import ErrorCode, format_user_message
 from app.core.logging import get_logger
 from app.services.catalog_service import CatalogService
 from app.services.embedding_service import EmbeddingConfig, EmbeddingService
@@ -130,6 +131,33 @@ class IndexService:
                 continue
 
             pptx = Path(abs_path)
+            if not pptx.exists():
+                message = format_user_message(ErrorCode.PATH_NOT_FOUND, detail=str(pptx))
+                log.warning("[PATH_NOT_FOUND] %s", message)
+                self.catalog.mark_index_error(abs_path, ErrorCode.PATH_NOT_FOUND.value, message)
+                progress("skip", fi, total_files, "檔案已移除，已略過")
+                continue
+            try:
+                start_stat = pptx.stat()
+                start_mtime = int(start_stat.st_mtime)
+                start_size = int(start_stat.st_size)
+            except PermissionError as exc:
+                message = format_user_message(ErrorCode.PERMISSION_DENIED, detail=str(exc))
+                log.warning("[PERMISSION_DENIED] %s", message)
+                self.catalog.mark_index_error(abs_path, ErrorCode.PERMISSION_DENIED.value, message)
+                progress("skip", fi, total_files, "檔案權限不足，已略過")
+                continue
+            except Exception as exc:
+                log.warning("讀取檔案狀態失敗：%s (%s)", pptx, exc)
+                continue
+
+            if int(f.get("modified_time") or -1) != start_mtime or int(f.get("size") or -1) != start_size:
+                message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
+                log.warning("[MTIME_CHANGED] %s", message)
+                self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
+                progress("skip", fi, total_files, "檔案已變更，請重新掃描")
+                continue
+
             progress("extract", fi, total_files, f"抽取文字：{pptx.name}")
             slide_texts = self.extractor.extract(pptx)
 
@@ -142,6 +170,9 @@ class IndexService:
             rr = self.renderer.render_pptx(pptx, file_hash, slides_count=len(slide_texts))
             render_message = rr.message
             thumbs = rr.thumbs
+            if not rr.ok:
+                log.warning("[RENDERER_ERROR] %s (%s)", pptx, rr.message)
+                progress("render", fi, total_files, rr.message)
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
@@ -209,6 +240,21 @@ class IndexService:
                         "indexed_at": int(time.time()),
                     }
                 )
+
+            try:
+                end_stat = pptx.stat()
+                end_mtime = int(end_stat.st_mtime)
+                end_size = int(end_stat.st_size)
+            except Exception:
+                end_mtime = start_mtime
+                end_size = start_size
+
+            if end_mtime != start_mtime or end_size != start_size:
+                message = format_user_message(ErrorCode.MTIME_CHANGED, detail=str(pptx))
+                log.warning("[MTIME_CHANGED] %s", message)
+                self.catalog.mark_index_error(abs_path, ErrorCode.MTIME_CHANGED.value, message)
+                progress("skip", fi, total_files, "索引期間檔案有變更，已略過")
+                continue
 
             slides.extend(new_entries)
             self.catalog.mark_indexed(abs_path, slides_count=len(slide_texts))

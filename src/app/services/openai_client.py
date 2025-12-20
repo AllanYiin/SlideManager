@@ -77,7 +77,7 @@ class OpenAIClient:
                         if delta:
                             loop.call_soon_threadsafe(q.put_nowait, delta)
             except Exception as e:
-                log.error("OpenAI streaming 失敗：%s", e)
+                log.error("[OPENAI_ERROR] OpenAI streaming 失敗：%s", e)
                 loop.call_soon_threadsafe(q.put_nowait, f"\n[串流錯誤] {e}\n")
             finally:
                 loop.call_soon_threadsafe(q.put_nowait, STOP)

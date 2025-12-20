@@ -39,5 +39,5 @@ def read_json(path: Path, default: object) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        log.error("讀取 JSON 失敗：%s (%s)", path, e)
+        log.error("[JSON_ERROR] 讀取 JSON 失敗：%s (%s)", path, e)
         return default

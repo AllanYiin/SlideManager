@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from app.core.errors import ErrorCode
 from app.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -25,8 +26,13 @@ class ExtractionService:
     def extract(self, pptx_path: Path) -> List[SlideText]:
         from pptx import Presentation
 
-        prs = Presentation(str(pptx_path))
+        try:
+            prs = Presentation(str(pptx_path))
+        except Exception as exc:
+            log.error("讀取 PPTX 失敗：%s (%s)", pptx_path, exc)
+            return []
         out: List[SlideText] = []
+        empty_count = 0
         for idx, slide in enumerate(prs.slides, start=1):
             texts: List[str] = []
             title = ""
@@ -63,6 +69,10 @@ class ExtractionService:
 
             all_text = "\n".join(texts).strip()
             body = "\n".join(body_parts).strip()
+            if not all_text:
+                empty_count += 1
             out.append(SlideText(page=idx, title=title, body=body, all_text=all_text))
 
+        if empty_count:
+            log.info("[%s] 投影片文字為空：%s (%s/%s)", ErrorCode.EMPTY_TEXT.value, pptx_path, empty_count, len(out))
         return out

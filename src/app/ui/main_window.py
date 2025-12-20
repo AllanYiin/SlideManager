@@ -29,6 +29,7 @@ from app.ui.tabs.chat_tab import ChatTab
 from app.ui.tabs.library_tab import LibraryTab
 from app.ui.tabs.search_tab import SearchTab
 from app.ui.tabs.settings_tab import SettingsTab
+from app.ui.toast import Toast
 
 log = get_logger(__name__)
 
@@ -181,3 +182,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
             return
         self.library_tab.start_index_needed()
+
+    def show_toast(self, message: str, *, level: str = "info", timeout_ms: int = 8000) -> None:
+        toast = Toast(self, message, level=level, timeout_ms=timeout_ms)
+        toast.show_toast()
