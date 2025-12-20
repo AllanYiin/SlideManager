@@ -3,8 +3,10 @@
 import sys
 import tempfile
 import unittest
+
+import warnings
 from pathlib import Path
-from unittest.mock import patch
+
 
 # 讓 unittest 在任何工作目錄下都能找到 src/app
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +16,21 @@ if str(SRC) not in sys.path:
 
 from app.services.catalog_service import CatalogService
 from app.services.project_store import ProjectStore
+
+
+
+def _build_pptx(path: Path, slides: int = 1) -> bool:
+    try:
+        from pptx import Presentation
+    except Exception as exc:
+        warnings.warn(f"無法載入 python-pptx，略過建立測試 PPTX：{exc}")
+        return False
+
+    prs = Presentation()
+    for _ in range(slides):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    prs.save(str(path))
+    return True
 
 
 class TestCatalogService(unittest.TestCase):
@@ -33,16 +50,16 @@ class TestCatalogService(unittest.TestCase):
             dirs = svc.remove_whitelist_dir(td)
             self.assertEqual(dirs, [])
 
-    @patch("app.services.catalog_service.read_pptx_metadata")
-    def test_scan_and_mark_indexed(self, mock_meta):
-        mock_meta.return_value = {
-            "slide_count": 2,
-            "core_properties": {"title": "demo", "author": "tester"},
-        }
+
+    def test_scan_and_mark_indexed(self):
         with tempfile.TemporaryDirectory() as td:
+            if sys.platform != "win32":
+                warnings.warn("非 Windows 平台，PPTX 讀取結果可能與預期不同")
             root = Path(td)
             pptx_path = root / "demo.pptx"
-            pptx_path.write_bytes(b"fake")
+            if not _build_pptx(pptx_path, slides=2):
+                self.skipTest("無法建立 PPTX，略過測試")
+
 
             store = ProjectStore(root)
             svc = CatalogService(store)
@@ -59,13 +76,16 @@ class TestCatalogService(unittest.TestCase):
             self.assertTrue(cat["files"][0]["indexed"])
             self.assertEqual(cat["files"][0]["slides_count"], 2)
 
-    @patch("app.services.catalog_service.read_pptx_metadata")
-    def test_mark_missing_and_clear(self, mock_meta):
-        mock_meta.return_value = {"slide_count": 1, "core_properties": None}
+
+    def test_mark_missing_and_clear(self):
         with tempfile.TemporaryDirectory() as td:
+            if sys.platform != "win32":
+                warnings.warn("非 Windows 平台，PPTX 讀取結果可能與預期不同")
             root = Path(td)
             pptx_path = root / "remove_me.pptx"
-            pptx_path.write_bytes(b"fake")
+            if not _build_pptx(pptx_path, slides=1):
+                self.skipTest("無法建立 PPTX，略過測試")
+
 
             store = ProjectStore(root)
             svc = CatalogService(store)
