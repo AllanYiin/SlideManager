@@ -17,7 +17,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf staging
+
+          rm -rf staging release-package.zip
+
           mkdir -p staging
           rsync -a --exclude '.git' --exclude '*.zip' ./ staging/
 
@@ -26,8 +28,17 @@ jobs:
             rm staging/.env.example
           fi
 
+
+      - name: Create zip archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staging
+          zip -r ../release-package.zip . -x "*.zip"
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-package
-          path: staging
+
+          path: release-package.zip
+

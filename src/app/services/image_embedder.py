@@ -37,6 +37,9 @@ class ImageEmbedder:
             self.input_name = self._ort_session.get_inputs()[0].name
             self.output_name = self._ort_session.get_outputs()[0].name
             log.info("ImageEmbedder：已載入 ONNX 模型：%s", model_path)
+        except ImportError as exc:
+            log.exception("[ONNX_ERROR] onnxruntime 載入失敗 (%s): %s", model_path, exc)
+            raise RuntimeError("onnxruntime 無法載入，請確認已安裝對應版本與系統依賴") from exc
         except Exception as exc:
             log.exception("[ONNX_ERROR] 載入 ONNX 模型失敗 (%s): %s", model_path, exc)
             raise RuntimeError("載入圖片模型失敗，檔案可能損毀，請重新下載 rerankTexure.onnx") from exc
@@ -69,6 +72,20 @@ class ImageEmbedder:
                 log.exception("[ONNX_ERROR] 圖片嵌入失敗 (%s): %s", path, exc)
                 outputs.append(np.zeros((self.dim,), dtype=np.float16))
         return np.vstack(outputs)
+
+    @staticmethod
+    def _preprocess_image_bytes(image_bytes: bytes) -> np.ndarray:
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            if img.size != (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE):
+                img = img.resize((MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+            img_np = np.array(img).astype(np.float32)
+        img_np = (img_np - 127.5) / 127.5
+        img_np = img_np.transpose(2, 0, 1)
+        return np.expand_dims(img_np, axis=0)
 
     @staticmethod
     def _preprocess_image(img_path: Path) -> np.ndarray:
@@ -150,17 +167,3 @@ class ImageEmbeddingService:
         if not self._embedder:
             return np.zeros((len(image_paths), dim), dtype=np.float32)
         return self._embedder.embed_images(image_paths).astype(np.float32)
-
-    @staticmethod
-    def _preprocess_image_bytes(image_bytes: bytes) -> np.ndarray:
-        from PIL import Image
-        import io
-
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            img = img.convert("RGB")
-            if img.size != (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE):
-                img = img.resize((MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
-            img_np = np.array(img).astype(np.float32)
-        img_np = (img_np - 127.5) / 127.5
-        img_np = img_np.transpose(2, 0, 1)
-        return np.expand_dims(img_np, axis=0)
