@@ -3,8 +3,10 @@
 import sys
 import tempfile
 import unittest
+
 import warnings
 from pathlib import Path
+
 
 # 讓 unittest 在任何工作目錄下都能找到 src/app
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from app.services.catalog_service import CatalogService
 from app.services.project_store import ProjectStore
+
 
 
 def _build_pptx(path: Path, slides: int = 1) -> bool:
@@ -47,6 +50,7 @@ class TestCatalogService(unittest.TestCase):
             dirs = svc.remove_whitelist_dir(td)
             self.assertEqual(dirs, [])
 
+
     def test_scan_and_mark_indexed(self):
         with tempfile.TemporaryDirectory() as td:
             if sys.platform != "win32":
@@ -55,6 +59,7 @@ class TestCatalogService(unittest.TestCase):
             pptx_path = root / "demo.pptx"
             if not _build_pptx(pptx_path, slides=2):
                 self.skipTest("無法建立 PPTX，略過測試")
+
 
             store = ProjectStore(root)
             svc = CatalogService(store)
@@ -71,6 +76,7 @@ class TestCatalogService(unittest.TestCase):
             self.assertTrue(cat["files"][0]["indexed"])
             self.assertEqual(cat["files"][0]["slides_count"], 2)
 
+
     def test_mark_missing_and_clear(self):
         with tempfile.TemporaryDirectory() as td:
             if sys.platform != "win32":
@@ -79,6 +85,7 @@ class TestCatalogService(unittest.TestCase):
             pptx_path = root / "remove_me.pptx"
             if not _build_pptx(pptx_path, slides=1):
                 self.skipTest("無法建立 PPTX，略過測試")
+
 
             store = ProjectStore(root)
             svc = CatalogService(store)
