@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.logging import get_logger
 from app.services.project_store import ProjectStore
+from app.services.metadata_service import read_pptx_metadata
 
 log = get_logger(__name__)
 
@@ -31,43 +32,84 @@ class CatalogService:
     def __init__(self, store: ProjectStore):
         self.store = store
 
-    def get_whitelist_dirs(self) -> List[str]:
+    def _normalize_dir(self, dir_path: str) -> str:
+        return str(Path(dir_path).resolve())
+
+    def _load_whitelist(self) -> List[Dict[str, Any]]:
         proj = self.store.load_project()
-        return list(proj.get("whitelist_dirs", []))
+        dirs = proj.get("whitelist_dirs", [])
+        return [d for d in dirs if isinstance(d, dict) and d.get("path")]
+
+    def _save_whitelist(self, dirs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        proj = self.store.load_project()
+        proj["whitelist_dirs"] = dirs
+        self.store.save_project(proj)
+        return dirs
+
+    def get_whitelist_dirs(self) -> List[str]:
+        return [str(d.get("path")) for d in self._load_whitelist()]
+
+    def get_whitelist_entries(self) -> List[Dict[str, Any]]:
+        return list(self._load_whitelist())
 
     def add_whitelist_dir(self, dir_path: str) -> List[str]:
-        proj = self.store.load_project()
-        dirs = list(proj.get("whitelist_dirs", []))
-        p = str(Path(dir_path).resolve())
-        if p not in dirs:
-            dirs.append(p)
-        proj["whitelist_dirs"] = dirs
-        self.store.save_project(proj)
-        return dirs
+        p = self._normalize_dir(dir_path)
+        dirs = self._load_whitelist()
+        if not any(d.get("path") == p for d in dirs):
+            dirs.append({"path": p, "enabled": True, "recursive": True})
+        self._save_whitelist(dirs)
+        return [d["path"] for d in dirs]
 
     def remove_whitelist_dir(self, dir_path: str) -> List[str]:
-        proj = self.store.load_project()
-        dirs = [d for d in list(proj.get("whitelist_dirs", [])) if d != dir_path]
-        proj["whitelist_dirs"] = dirs
-        self.store.save_project(proj)
-        return dirs
+        p = self._normalize_dir(dir_path)
+        dirs = [d for d in self._load_whitelist() if d.get("path") != p]
+        self._save_whitelist(dirs)
+        return [d["path"] for d in dirs]
+
+    def update_whitelist_dir(
+        self,
+        dir_path: str,
+        *,
+        enabled: Optional[bool] = None,
+        recursive: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        p = self._normalize_dir(dir_path)
+        dirs = self._load_whitelist()
+        for entry in dirs:
+            if entry.get("path") == p:
+                if enabled is not None:
+                    entry["enabled"] = bool(enabled)
+                if recursive is not None:
+                    entry["recursive"] = bool(recursive)
+        return self._save_whitelist(dirs)
+
+    def set_whitelist_recursive(self, dir_path: str, recursive: bool) -> List[Dict[str, Any]]:
+        return self.update_whitelist_dir(dir_path, recursive=recursive)
+
+    def set_whitelist_enabled(self, dir_path: str, enabled: bool) -> List[Dict[str, Any]]:
+        return self.update_whitelist_dir(dir_path, enabled=enabled)
 
     def scan(self) -> Dict[str, Any]:
         """掃描白名單目錄，更新 catalog.json。"""
-        whitelist = self.get_whitelist_dirs()
+        whitelist = self._load_whitelist()
         existing = self.store.load_catalog().get("files", [])
         by_path = {e.get("abs_path"): e for e in existing if isinstance(e, dict) and e.get("abs_path")}
+        touched_paths = set()
 
         files: List[Dict[str, Any]] = []
-        for d in whitelist:
-            root = Path(d)
+        for entry in whitelist:
+            if not entry.get("enabled", True):
+                continue
+            root = Path(str(entry.get("path")))
             if not root.exists():
                 continue
-            for path in root.rglob("*.pptx"):
+            walker = root.rglob("*.pptx") if entry.get("recursive", True) else root.glob("*.pptx")
+            for path in walker:
                 try:
                     st = path.stat()
                     abs_path = str(path.resolve())
                     prev = by_path.get(abs_path)
+                    touched_paths.add(abs_path)
 
                     # 快速判斷是否需要重算 hash
                     mtime = int(st.st_mtime)
@@ -79,6 +121,30 @@ class CatalogService:
                         file_hash = _sha256_file(path)
 
                     file_id = hashlib.sha256(abs_path.encode("utf-8", errors="ignore")).hexdigest()
+                    core_props = prev.get("core_properties") if prev else None
+                    slide_count = prev.get("slide_count") if prev else None
+                    if prev and (prev.get("metadata_mtime") != mtime or prev.get("metadata_size") != size):
+                        core_props = None
+                        slide_count = None
+                    if core_props is None or slide_count is None:
+                        try:
+                            meta = read_pptx_metadata(path)
+                            core_props = meta.get("core_properties")
+                            slide_count = meta.get("slide_count")
+                        except Exception as e:
+                            log.warning("讀取 metadata 失敗：%s (%s)", path, e)
+
+                    index_status = prev.get("index_status") if prev else None
+                    if not index_status and prev:
+                        indexed = bool(prev.get("indexed"))
+                        index_status = {
+                            "indexed": indexed,
+                            "indexed_epoch": prev.get("indexed_at"),
+                            "index_mtime_epoch": prev.get("modified_time") if indexed else None,
+                            "index_slide_count": prev.get("slides_count") if indexed else 0,
+                            "last_error": None,
+                        }
+
                     entry = {
                         "file_id": file_id,
                         "abs_path": abs_path,
@@ -86,18 +152,35 @@ class CatalogService:
                         "size": size,
                         "modified_time": mtime,
                         "file_hash": file_hash,
+                        "metadata_size": size,
+                        "metadata_mtime": mtime,
+                        "core_properties": core_props,
+                        "slide_count": slide_count,
                         "indexed": bool(prev.get("indexed")) if prev else False,
                         "indexed_at": prev.get("indexed_at") if prev else None,
                         "slides_count": int(prev.get("slides_count", 0)) if prev else 0,
+                        "index_status": index_status,
+                        "missing": False,
                     }
                     files.append(entry)
                 except Exception as e:
                     log.warning("掃描檔案失敗：%s (%s)", path, e)
 
+        # 標記 missing
+        for prev in existing:
+            if not isinstance(prev, dict):
+                continue
+            abs_path = prev.get("abs_path")
+            if abs_path and abs_path not in touched_paths:
+                prev_entry = dict(prev)
+                prev_entry["missing"] = True
+                files.append(prev_entry)
+
         out = {
             "schema_version": self.store.load_catalog().get("schema_version", "1.0"),
             "files": sorted(files, key=lambda x: (x.get("filename", ""), x.get("abs_path", ""))),
             "scanned_at": int(time.time()),
+            "whitelist_dirs": whitelist,
         }
         self.store.save_catalog(out)
         return out
@@ -111,6 +194,14 @@ class CatalogService:
                 e["indexed"] = True
                 e["indexed_at"] = now
                 e["slides_count"] = int(slides_count)
+                mtime = e.get("modified_time")
+                e["index_status"] = {
+                    "indexed": True,
+                    "indexed_epoch": now,
+                    "index_mtime_epoch": int(mtime) if mtime is not None else None,
+                    "index_slide_count": int(slides_count),
+                    "last_error": None,
+                }
         cat["files"] = files
         self.store.save_catalog(cat)
 
@@ -122,5 +213,21 @@ class CatalogService:
                 e["indexed"] = False
                 e["indexed_at"] = None
                 e["slides_count"] = 0
+                e["index_status"] = {
+                    "indexed": False,
+                    "indexed_epoch": None,
+                    "index_mtime_epoch": None,
+                    "index_slide_count": 0,
+                    "last_error": None,
+                }
         cat["files"] = files
         self.store.save_catalog(cat)
+
+    def clear_missing_files(self) -> int:
+        cat = self.store.load_catalog()
+        files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+        kept = [f for f in files if not f.get("missing")]
+        removed = len(files) - len(kept)
+        cat["files"] = kept
+        self.store.save_catalog(cat)
+        return removed

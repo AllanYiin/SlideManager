@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QProgressBar,
@@ -54,20 +55,26 @@ class LibraryTab(QWidget):
         btn_row = QHBoxLayout()
         self.btn_add_dir = QPushButton("新增")
         self.btn_remove_dir = QPushButton("移除")
+        self.btn_toggle_enabled = QPushButton("啟用/停用")
+        self.btn_toggle_recursive = QPushButton("遞迴/僅此層")
         btn_row.addWidget(self.btn_add_dir)
         btn_row.addWidget(self.btn_remove_dir)
+        btn_row.addWidget(self.btn_toggle_enabled)
+        btn_row.addWidget(self.btn_toggle_recursive)
         gbl.addLayout(btn_row)
         left_layout.addWidget(gb)
 
         self.btn_scan = QPushButton("掃描檔案")
         self.btn_index_needed = QPushButton("開始索引（需要者）")
         self.btn_index_selected = QPushButton("開始索引（選取檔案）")
+        self.btn_clear_missing = QPushButton("清理缺失項目")
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setEnabled(False)
 
         left_layout.addWidget(self.btn_scan)
         left_layout.addWidget(self.btn_index_needed)
         left_layout.addWidget(self.btn_index_selected)
+        left_layout.addWidget(self.btn_clear_missing)
         left_layout.addWidget(self.btn_cancel)
         left_layout.addStretch(1)
 
@@ -83,7 +90,7 @@ class LibraryTab(QWidget):
         right_layout.addLayout(filter_row)
 
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["檔名", "路徑", "修改時間", "大小", "已索引", "投影片數"])
+        self.table.setHorizontalHeaderLabels(["檔名", "路徑", "修改時間", "大小", "狀態", "投影片數"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -105,9 +112,12 @@ class LibraryTab(QWidget):
         # Signals
         self.btn_add_dir.clicked.connect(self.add_dir)
         self.btn_remove_dir.clicked.connect(self.remove_dir)
+        self.btn_toggle_enabled.clicked.connect(self.toggle_dir_enabled)
+        self.btn_toggle_recursive.clicked.connect(self.toggle_dir_recursive)
         self.btn_scan.clicked.connect(self.scan_files)
         self.btn_index_needed.clicked.connect(self.start_index_needed)
         self.btn_index_selected.clicked.connect(self.start_index_selected)
+        self.btn_clear_missing.clicked.connect(self.clear_missing_files)
         self.btn_cancel.clicked.connect(self.cancel_indexing)
         self.filter_edit.textChanged.connect(self.refresh_table)
 
@@ -121,9 +131,15 @@ class LibraryTab(QWidget):
         self.dir_list.clear()
         if not self.ctx:
             return
-        dirs = self.ctx.catalog.get_whitelist_dirs()
+        dirs = self.ctx.catalog.get_whitelist_entries()
         for d in dirs:
-            self.dir_list.addItem(d)
+            path = d.get("path", "")
+            enabled = "啟用" if d.get("enabled", True) else "停用"
+            recursive = "遞迴" if d.get("recursive", True) else "僅此層"
+            label = f"{path}  ({enabled} / {recursive})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, path)
+            self.dir_list.addItem(item)
 
     def add_dir(self) -> None:
         if not self.ctx:
@@ -141,8 +157,36 @@ class LibraryTab(QWidget):
         item = self.dir_list.currentItem()
         if not item:
             return
-        p = item.text()
+        p = item.data(Qt.UserRole) or item.text()
         self.ctx.catalog.remove_whitelist_dir(p)
+        self.refresh_dirs()
+
+    def toggle_dir_enabled(self) -> None:
+        if not self.ctx:
+            return
+        item = self.dir_list.currentItem()
+        if not item:
+            return
+        path = item.data(Qt.UserRole) or item.text()
+        entries = self.ctx.catalog.get_whitelist_entries()
+        target = next((e for e in entries if e.get("path") == path), None)
+        if not target:
+            return
+        self.ctx.catalog.set_whitelist_enabled(path, not target.get("enabled", True))
+        self.refresh_dirs()
+
+    def toggle_dir_recursive(self) -> None:
+        if not self.ctx:
+            return
+        item = self.dir_list.currentItem()
+        if not item:
+            return
+        path = item.data(Qt.UserRole) or item.text()
+        entries = self.ctx.catalog.get_whitelist_entries()
+        target = next((e for e in entries if e.get("path") == path), None)
+        if not target:
+            return
+        self.ctx.catalog.set_whitelist_recursive(path, not target.get("recursive", True))
         self.refresh_dirs()
 
     # ---------- scan ----------
@@ -167,6 +211,7 @@ class LibraryTab(QWidget):
         self.prog.setValue(0)
         self.prog_label.setText("掃描完成")
         self.refresh_table()
+        self.refresh_dirs()
 
     # ---------- table ----------
     def refresh_table(self) -> None:
@@ -195,13 +240,35 @@ class LibraryTab(QWidget):
             mtime_s = ""
         size = f.get("size", 0)
         size_s = f"{int(size)/1024/1024:.1f} MB" if size else ""
-        indexed = "是" if f.get("indexed") else "否"
-        slides = str(f.get("slides_count", 0))
+        status = self._status_text(f)
+        slides = f.get("slide_count")
+        slides_s = str(slides) if slides is not None else "-"
 
-        for c, val in enumerate([fn, path, mtime_s, size_s, indexed, slides]):
+        for c, val in enumerate([fn, path, mtime_s, size_s, status, slides_s]):
             it = QTableWidgetItem(str(val))
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
             self.table.setItem(r, c, it)
+
+    def _status_text(self, f: Dict[str, Any]) -> str:
+        if f.get("missing"):
+            return "缺失"
+        status = f.get("index_status") if isinstance(f.get("index_status"), dict) else {}
+        indexed = bool(status.get("indexed")) if status else bool(f.get("indexed"))
+        if not indexed:
+            return "未索引"
+        mtime = int(f.get("modified_time") or 0)
+        index_mtime = int(status.get("index_mtime_epoch") or 0)
+        slide_count = f.get("slide_count")
+        index_slide_count = status.get("index_slide_count")
+        if mtime > index_mtime:
+            return "需要索引"
+        if slide_count is not None and index_slide_count is not None:
+            try:
+                if int(slide_count) != int(index_slide_count):
+                    return "需要索引"
+            except Exception:
+                return "需要索引"
+        return "已索引"
 
     def selected_files(self) -> List[Dict[str, Any]]:
         if not self.ctx:
@@ -287,6 +354,7 @@ class LibraryTab(QWidget):
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self.refresh_table()
+        self.refresh_dirs()
 
         try:
             code, msg = result
@@ -305,3 +373,10 @@ class LibraryTab(QWidget):
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self.prog_label.setText("發生錯誤")
+
+    def clear_missing_files(self) -> None:
+        if not self.ctx:
+            return
+        removed = self.ctx.catalog.clear_missing_files()
+        self.refresh_table()
+        QMessageBox.information(self, "清理完成", f"已清理 {removed} 筆缺失項目")

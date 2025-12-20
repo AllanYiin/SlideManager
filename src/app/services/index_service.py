@@ -55,25 +55,30 @@ class IndexService:
         cat = self.store.load_catalog()
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
 
-        index = self.store.load_index()
-        slides = [s for s in index.get("slides", []) if isinstance(s, dict)]
-
-        # 每個檔案：看是否存在任一 slide 且 hash 相同
-        by_path_hash = {}
-        for s in slides:
-            p = s.get("file_path")
-            h = s.get("file_hash")
-            if p and h:
-                by_path_hash[(p, h)] = True
-
         needed = []
         for f in files:
-            p = f.get("abs_path")
-            h = f.get("file_hash")
-            if not p or not h:
+            if f.get("missing"):
                 continue
-            if not by_path_hash.get((p, h)):
+            status = f.get("index_status") if isinstance(f.get("index_status"), dict) else {}
+            indexed = bool(status.get("indexed")) if status else bool(f.get("indexed"))
+            if not indexed:
                 needed.append(f)
+                continue
+            mtime = int(f.get("modified_time") or 0)
+            index_mtime = int(status.get("index_mtime_epoch") or 0)
+            if mtime > index_mtime:
+                needed.append(f)
+                continue
+            slide_count = f.get("slide_count")
+            index_slide_count = status.get("index_slide_count")
+            if slide_count is not None and index_slide_count is not None:
+                try:
+                    if int(slide_count) != int(index_slide_count):
+                        needed.append(f)
+                        continue
+                except Exception:
+                    needed.append(f)
+                    continue
         return needed
 
     def rebuild_for_files(
