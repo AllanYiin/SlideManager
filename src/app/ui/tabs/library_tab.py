@@ -355,8 +355,14 @@ class LibraryTab(QWidget):
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle("未偵測到可用的 renderer")
-            box.setText("目前沒有可用的投影片 renderer（LibreOffice/PowerPoint）。此輪索引將只建立文字索引，不會產生縮圖。")
-            box.setInformativeText("要繼續索引嗎？")
+            box.setText(
+                "目前沒有可用的投影片 renderer（LibreOffice/PowerPoint）。"
+                "此輪索引將只建立文字索引，不會產生縮圖。"
+            )
+            box.setInformativeText(
+                "Renderer 是系統層級的投影片軟體，無法透過 requirements.txt 安裝。"
+                "請先安裝 LibreOffice 或 PowerPoint 後再重試。要繼續索引嗎？"
+            )
             box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
             box.setDefaultButton(QMessageBox.Ok)
             box.setTextInteractionFlags(Qt.TextSelectableByMouse)
