@@ -14,6 +14,37 @@ from app.services.metadata_service import read_pptx_metadata
 
 log = get_logger(__name__)
 
+_SKIP_DIR_NAMES = {
+    "appdata",
+    "program files",
+    "program files (x86)",
+    "windows",
+}
+
+
+def _is_excluded_path(path: Path) -> bool:
+    parts = [p.casefold() for p in path.parts]
+    return any(part in _SKIP_DIR_NAMES for part in parts)
+
+
+def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
+    if _is_excluded_path(root):
+        log.info("略過預設不掃描目錄：%s", root)
+        return []
+    if not recursive:
+        return list(root.glob("*.pptx"))
+    files: List[Path] = []
+    for current_root, dirnames, filenames in os.walk(root):
+        filtered_dirs = [d for d in dirnames if d.casefold() not in _SKIP_DIR_NAMES]
+        if len(filtered_dirs) != len(dirnames):
+            skipped = sorted(set(dirnames) - set(filtered_dirs))
+            log.info("略過預設不掃描子目錄：%s -> %s", current_root, ", ".join(skipped))
+        dirnames[:] = filtered_dirs
+        for name in filenames:
+            if name.lower().endswith(".pptx"):
+                files.append(Path(current_root) / name)
+    return files
+
 
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -138,9 +169,8 @@ class CatalogService:
                 )
                 log.warning("[PERMISSION_DENIED] 白名單路徑權限不足：%s", root)
                 continue
-            walker = root.rglob("*.pptx") if entry.get("recursive", True) else root.glob("*.pptx")
             try:
-                for path in walker:
+                for path in _iter_pptx_files(root, entry.get("recursive", True)):
                     if path.name.startswith("~$"):
                         continue
                     try:
