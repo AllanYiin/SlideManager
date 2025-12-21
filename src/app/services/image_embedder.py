@@ -13,6 +13,8 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 
+FLOAT_DTYPE = np.float16 if hasattr(np, "float16") else np.float32
+
 MODEL_INPUT_SIZE = 224
 
 
@@ -51,15 +53,15 @@ class ImageEmbedder:
         try:
             input_data = self._preprocess_image_bytes(image_bytes)
             embedding = self._ort_session.run([self.output_name], {self.input_name: input_data})[0]
-            embedding = np.squeeze(embedding, axis=0).astype(np.float16)
+            embedding = np.squeeze(embedding, axis=0).astype(FLOAT_DTYPE)
             return self._align_dim(embedding)
         except Exception as exc:
             log.exception("[ONNX_ERROR] 圖片嵌入失敗 (bytes): %s", exc)
-            return np.zeros((self.dim,), dtype=np.float16)
+            return np.zeros((self.dim,), dtype=FLOAT_DTYPE)
 
     def embed_images(self, image_paths: List[Path], *, batch_size: int = 16) -> np.ndarray:
         if not image_paths:
-            return np.zeros((0, self.dim), dtype=np.float16)
+            return np.zeros((0, self.dim), dtype=FLOAT_DTYPE)
 
         outputs: List[np.ndarray] = []
         safe_batch_size = max(1, int(batch_size))
@@ -68,13 +70,13 @@ class ImageEmbedder:
             try:
                 input_data = self._preprocess_images(batch_paths)
                 embedding = self._ort_session.run([self.output_name], {self.input_name: input_data})[0]
-                embedding = np.asarray(embedding).astype(np.float16)
+                embedding = np.asarray(embedding).astype(FLOAT_DTYPE)
                 if embedding.ndim == 1:
                     embedding = np.expand_dims(embedding, axis=0)
                 outputs.append(self._align_batch_dim(embedding))
             except Exception as exc:
                 log.exception("[ONNX_ERROR] 圖片嵌入失敗 (%s): %s", batch_paths, exc)
-                outputs.append(np.zeros((len(batch_paths), self.dim), dtype=np.float16))
+                outputs.append(np.zeros((len(batch_paths), self.dim), dtype=FLOAT_DTYPE))
         return np.vstack(outputs)
 
     @staticmethod
@@ -92,22 +94,22 @@ class ImageEmbedder:
         return np.expand_dims(img_np, axis=0)
 
     def _align_dim(self, vec: np.ndarray) -> np.ndarray:
-        v = np.asarray(vec, dtype=np.float16).reshape(-1)
+        v = np.asarray(vec, dtype=FLOAT_DTYPE).reshape(-1)
         if v.size == self.dim:
             return v
         if v.size > self.dim:
             return v[: self.dim]
-        pad = np.zeros((self.dim - v.size,), dtype=np.float16)
+        pad = np.zeros((self.dim - v.size,), dtype=FLOAT_DTYPE)
         return np.concatenate([v, pad], axis=0)
 
     def _align_batch_dim(self, batch: np.ndarray) -> np.ndarray:
         if batch.ndim != 2:
-            return np.zeros((0, self.dim), dtype=np.float16)
+            return np.zeros((0, self.dim), dtype=FLOAT_DTYPE)
         if batch.shape[1] == self.dim:
             return batch
         if batch.shape[1] > self.dim:
             return batch[:, : self.dim]
-        pad = np.zeros((batch.shape[0], self.dim - batch.shape[1]), dtype=np.float16)
+        pad = np.zeros((batch.shape[0], self.dim - batch.shape[1]), dtype=FLOAT_DTYPE)
         return np.concatenate([batch, pad], axis=1)
 
     @staticmethod
