@@ -131,6 +131,11 @@ class LibraryTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setTextElideMode(Qt.ElideMiddle)
+        self.table.setStyleSheet(
+            "QTableWidget { color: #0F172A; background: #FFFFFF; }"
+            "QTableWidget::item:selected { background: #E2E8F0; color: #0F172A; }"
+            "QHeaderView::section { color: #0F172A; background: #F1F5F9; }"
+        )
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
