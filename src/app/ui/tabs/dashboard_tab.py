@@ -134,7 +134,7 @@ class DashboardTab(QWidget):
             btn.setProperty("status_code", code)
             btn.setStyleSheet(
                 "QPushButton{border:1px solid #E2E8F0;border-radius:10px;padding:8px 12px;"
-                f"color:{color};background:#FFFFFF;text-align:left;}"
+                f"color:{color};background:#FFFFFF;text-align:left;}}"
                 "QPushButton:hover{background:#F1F5F9;}"
             )
             btn.clicked.connect(self._on_status_click)
