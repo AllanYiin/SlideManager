@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import importlib.util
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+if importlib.util.find_spec("numpy") is None:
+    raise unittest.SkipTest("numpy 未安裝，跳過 project_store 測試。")
 
 from app.services.project_store import ProjectStore
 
