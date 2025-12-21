@@ -6,7 +6,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -58,6 +58,16 @@ class LibraryTab(QWidget):
         self._last_action_label = ""
         self._scan_files_cache: List[Dict[str, Any]] = []
         self._scan_count = 0
+        self._pending_table_refresh = False
+        self._pending_metrics_refresh = False
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(2000)
+        self._refresh_timer.timeout.connect(self._flush_table_refresh)
+        self._metrics_timer = QTimer(self)
+        self._metrics_timer.setSingleShot(True)
+        self._metrics_timer.setInterval(10000)
+        self._metrics_timer.timeout.connect(self._flush_metrics_refresh)
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -672,9 +682,7 @@ class LibraryTab(QWidget):
             if msg:
                 self.main_window.status.showMessage(msg)
             if stage in {"file_done", "skip", "extracted"}:
-                self.refresh_table()
-                if hasattr(self.main_window, "dashboard_tab"):
-                    self.main_window.dashboard_tab.refresh_metrics()
+                self._schedule_index_refresh()
         except Exception:
             pass
 
@@ -736,6 +744,24 @@ class LibraryTab(QWidget):
     def _set_last_action(self, label: str, action) -> None:
         self._last_action_label = label
         self._last_action = action
+
+    def _schedule_index_refresh(self) -> None:
+        self._pending_table_refresh = True
+        self._pending_metrics_refresh = True
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+        if not self._metrics_timer.isActive():
+            self._metrics_timer.start()
+
+    def _flush_table_refresh(self) -> None:
+        if self._pending_table_refresh:
+            self.refresh_table()
+        self._pending_table_refresh = False
+
+    def _flush_metrics_refresh(self) -> None:
+        if self._pending_metrics_refresh and hasattr(self.main_window, "dashboard_tab"):
+            self.main_window.dashboard_tab.refresh_metrics()
+        self._pending_metrics_refresh = False
 
     def clear_missing_files(self) -> None:
         if not self.ctx:
