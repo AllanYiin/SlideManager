@@ -351,15 +351,20 @@ class LibraryTab(QWidget):
             self.table.sortItems(header.sortIndicatorSection(), header.sortIndicatorOrder())
 
     def _set_row(self, r: int, f: Dict[str, Any]) -> None:
-        fn = f.get("filename", "")
-        path = f.get("abs_path", "")
-        mtime = f.get("modified_time")
+        path = f.get("abs_path") or f.get("file_path") or f.get("path") or ""
+        fn = f.get("filename") or f.get("file_name") or f.get("name") or ""
+        if not fn and path:
+            try:
+                fn = Path(path).name
+            except Exception:
+                fn = ""
+        mtime = f.get("modified_time") or f.get("mtime") or f.get("modified_at")
         try:
             dt = datetime.datetime.fromtimestamp(int(mtime))
             mtime_s = dt.strftime("%Y-%m-%d %H:%M")
         except Exception:
             mtime_s = ""
-        size = f.get("size", 0)
+        size = f.get("size") or f.get("bytes") or 0
         size_s = f"{int(size)/1024/1024:.1f} MB" if size else ""
         status = self._status_text(f)
         slides = f.get("slide_count")
