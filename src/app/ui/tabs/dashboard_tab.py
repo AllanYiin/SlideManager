@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -208,10 +207,12 @@ class DashboardTab(QWidget):
         if not self.ctx:
             return DashboardMetrics()
         try:
-            catalog = self.ctx.store.load_catalog()
-            index = self.ctx.store.load_index()
+            catalog = self.ctx.store.load_manifest()
+            meta = self.ctx.store.load_meta()
             files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
-            slides = [s for s in index.get("slides", []) if isinstance(s, dict)]
+            slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+            slides = [s for s in slides_map.values() if isinstance(s, dict)]
+            meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
         except Exception as exc:
             log.error("Dashboard 讀取資料失敗：%s", exc)
             if hasattr(self.main_window, "show_toast"):
@@ -226,7 +227,11 @@ class DashboardTab(QWidget):
         doc_error = 0
         doc_partial = 0
         for entry in docs:
-            status = classify_doc_status(entry)
+            status = classify_doc_status(
+                entry,
+                slides=[s for s in slides if s.get("file_id") == entry.get("file_id")],
+                meta_file=meta_files.get(entry.get("file_id")),
+            )
             if status == "indexed":
                 doc_indexed += 1
             elif status == "pending":
@@ -239,41 +244,25 @@ class DashboardTab(QWidget):
                 doc_partial += 1
 
         slide_total = self._compute_slide_total(docs, slides)
-        doc_paths = {f.get("abs_path") for f in docs if f.get("abs_path")}
-        slide_indexed = sum(
-            1
-            for s in slides
-            if self._is_slide_indexed(s, doc_paths)
-        )
-
-        text_dim = int(index.get("embedding", {}).get("text_dim") or 1536)
-        image_dim = int(index.get("embedding", {}).get("image_dim") or 4096)
-        concat_dim = text_dim + image_dim
+        slide_indexed = sum(1 for s in slides if self._is_slide_indexed(s))
 
         bm25_ok = 0
         text_ok = 0
         image_ok = 0
-        fusion_ok = 0
         fusion_full_ok = 0
         for s in slides:
-            if s.get("file_path") not in doc_paths:
-                continue
-            bm25_tokens = s.get("bm25_tokens") or []
-            if isinstance(bm25_tokens, list) and len(bm25_tokens) > 0:
+            flags = s.get("flags") if isinstance(s.get("flags"), dict) else {}
+            if flags.get("has_bm25"):
                 bm25_ok += 1
-            if self._vec_len_ok(s.get("text_vec"), text_dim):
+            if flags.get("has_text_vec"):
                 text_ok += 1
-            if self._vec_len_ok(s.get("image_vec"), image_dim):
+            if flags.get("has_image_vec"):
                 image_ok += 1
-            if self._vec_len_ok(s.get("concat_vec"), concat_dim):
-                fusion_ok += 1
-            if self._vec_len_ok(s.get("text_vec"), text_dim) and self._vec_len_ok(s.get("image_vec"), image_dim):
+            if flags.get("has_text_vec") and flags.get("has_image_vec"):
                 fusion_full_ok += 1
 
         denom = slide_total if slide_total > 0 else 1
-        fusion_note = "融合向量已存於 index.json"
-        if not any(s.get("concat_vec") for s in slides):
-            fusion_note = "融合向量為查詢時組合"
+        fusion_note = "融合向量為查詢時組合"
 
         return DashboardMetrics(
             doc_total=doc_total,
@@ -288,7 +277,6 @@ class DashboardTab(QWidget):
             bm25_coverage=bm25_ok / denom,
             text_coverage=text_ok / denom,
             image_coverage=image_ok / denom,
-            fusion_coverage=fusion_ok / denom,
             fusion_full_coverage=fusion_full_ok / denom,
             fusion_note=fusion_note,
         )
@@ -296,7 +284,7 @@ class DashboardTab(QWidget):
     def _compute_slide_total(self, docs: List[Dict[str, Any]], slides: List[Dict[str, Any]]) -> int:
         by_path: Dict[str, int] = {}
         for s in slides:
-            path = s.get("file_path")
+            path = s.get("file_id")
             if not path:
                 continue
             by_path[path] = by_path.get(path, 0) + 1
@@ -304,42 +292,27 @@ class DashboardTab(QWidget):
         for doc in docs:
             slide_count = doc.get("slide_count")
             if slide_count is None:
-                total += by_path.get(doc.get("abs_path"), 0)
+                total += by_path.get(doc.get("file_id"), 0)
                 continue
             try:
                 total += int(slide_count)
             except Exception:
-                total += by_path.get(doc.get("abs_path"), 0)
+                total += by_path.get(doc.get("file_id"), 0)
         if total == 0:
             total = len(slides)
         return total
 
-    def _vec_len_ok(self, vec_b64: Any, expected_dim: int) -> bool:
-        if not vec_b64 or not expected_dim:
-            return False
-        if not isinstance(vec_b64, str):
-            return False
-        try:
-            raw = base64.b64decode(vec_b64.encode("ascii"))
-        except Exception:
-            return False
-        return len(raw) == expected_dim * 4
-
-    def _is_slide_indexed(self, slide: Dict[str, Any], doc_paths: set[str]) -> bool:
-        if slide.get("file_path") not in doc_paths:
-            return False
-        if slide.get("indexed_at"):
-            return True
-        for key in ("text_index_status", "image_index_status", "bm25_index_status"):
-            if slide.get(key) == "ok":
-                return True
-        bm25_tokens = slide.get("bm25_tokens")
-        if isinstance(bm25_tokens, list) and bm25_tokens:
-            return True
-        for key in ("text_vec", "image_vec", "concat_vec", "thumb_path"):
-            if slide.get(key):
-                return True
-        return False
+    def _is_slide_indexed(self, slide: Dict[str, Any]) -> bool:
+        flags = slide.get("flags") if isinstance(slide.get("flags"), dict) else {}
+        return any(
+            [
+                flags.get("has_text"),
+                flags.get("has_image"),
+                flags.get("has_text_vec"),
+                flags.get("has_image_vec"),
+                flags.get("has_bm25"),
+            ]
+        )
 
     def _build_kpi_card(self, title: str) -> tuple[QFrame, QLabel]:
         frame = ClickableFrame(self._clear_filters)

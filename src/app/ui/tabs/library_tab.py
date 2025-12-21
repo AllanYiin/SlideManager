@@ -267,6 +267,8 @@ class LibraryTab(QWidget):
         self.prog.setRange(0, 0)
         self._scan_files_cache = []
         self._scan_count = 0
+        self._meta_files: Dict[str, Any] = {}
+        self._slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
 
         def task(_progress_emit):
             return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10)
@@ -302,7 +304,7 @@ class LibraryTab(QWidget):
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):
             self.main_window.dashboard_tab.refresh_metrics()
-        cat = self.ctx.store.load_catalog() if self.ctx else {}
+        cat = self.ctx.store.load_manifest() if self.ctx else {}
         scan_errors = cat.get("scan_errors") if isinstance(cat, dict) else None
         if scan_errors:
             lines = []
@@ -336,17 +338,52 @@ class LibraryTab(QWidget):
         if not self.ctx:
             self.table.setRowCount(0)
             return
-        cat = self.ctx.store.load_catalog()
+        cat = self.ctx.store.load_manifest()
+        meta = self.ctx.store.load_meta()
+        self._meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
+        slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+        slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
+        for slide in slides_map.values():
+            if not isinstance(slide, dict):
+                continue
+            file_id = slide.get("file_id")
+            if not file_id:
+                continue
+            slides_by_file_id.setdefault(file_id, []).append(slide)
+        self._slides_by_file_id = slides_by_file_id
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
         self._refresh_table_with_files(files)
 
     def _refresh_table_with_files(self, files: List[Dict[str, Any]]) -> None:
+        if not hasattr(self, "_meta_files") or not hasattr(self, "_slides_by_file_id"):
+            if self.ctx:
+                meta = self.ctx.store.load_meta()
+                self._meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
+                slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+                slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
+                for slide in slides_map.values():
+                    if not isinstance(slide, dict):
+                        continue
+                    file_id = slide.get("file_id")
+                    if not file_id:
+                        continue
+                    slides_by_file_id.setdefault(file_id, []).append(slide)
+                self._slides_by_file_id = slides_by_file_id
         kw = (self.filter_edit.text() or "").strip().lower()
         if kw:
             files = [f for f in files if kw in (f.get("filename", "").lower())]
         status_filter = self.status_filter.currentData()
         if status_filter:
-            files = [f for f in files if classify_doc_status(f) == status_filter]
+            files = [
+                f
+                for f in files
+                if classify_doc_status(
+                    f,
+                    slides=self._slides_by_file_id.get(f.get("file_id"), []),
+                    meta_file=self._meta_files.get(f.get("file_id")),
+                )
+                == status_filter
+            ]
         coverage_filter = self.coverage_filter.currentData()
         if coverage_filter:
             files = [f for f in files if self._match_coverage_filter(f, coverage_filter)]
@@ -409,31 +446,34 @@ class LibraryTab(QWidget):
             self.table.setItem(r, c, it)
 
     def _status_text(self, f: Dict[str, Any]) -> str:
-        return STATUS_LABELS.get(classify_doc_status(f), "未處理")
+        file_id = f.get("file_id")
+        slides = self._slides_by_file_id.get(file_id, []) if hasattr(self, "_slides_by_file_id") else []
+        meta_file = self._meta_files.get(file_id) if hasattr(self, "_meta_files") else None
+        status = classify_doc_status(f, slides=slides, meta_file=meta_file)
+        return STATUS_LABELS.get(status, "未處理")
 
     def _match_coverage_filter(self, f: Dict[str, Any], coverage: str) -> bool:
-        status = f.get("index_status") if isinstance(f.get("index_status"), dict) else {}
+        file_id = f.get("file_id")
+        slides = self._slides_by_file_id.get(file_id, []) if hasattr(self, "_slides_by_file_id") else []
         slide_count = f.get("slide_count")
-        if slide_count is None:
-            slide_count = status.get("index_slide_count") or f.get("slides_count")
         try:
             slide_total = int(slide_count) if slide_count is not None else 0
         except Exception:
             slide_total = 0
         if slide_total <= 0:
             return False
-        text_count = status.get("text_indexed_count")
-        image_count = status.get("image_indexed_count")
+        flags = [s.get("flags", {}) for s in slides if isinstance(s.get("flags"), dict)]
+        text_count = sum(1 for f in flags if f.get("has_text_vec"))
+        image_count = sum(1 for f in flags if f.get("has_image_vec"))
+        bm25_count = sum(1 for f in flags if f.get("has_bm25"))
         if coverage in {"text_missing", "bm25_missing"}:
-            return isinstance(text_count, int) and text_count < slide_total
+            if coverage == "bm25_missing":
+                return bm25_count < slide_total
+            return text_count < slide_total
         if coverage == "image_missing":
-            return isinstance(image_count, int) and image_count < slide_total
+            return image_count < slide_total
         if coverage == "fusion_missing":
-            return (
-                isinstance(text_count, int)
-                and isinstance(image_count, int)
-                and (text_count < slide_total or image_count < slide_total)
-            )
+            return text_count < slide_total or image_count < slide_total
         return False
 
     def apply_status_filter(self, status: str | None) -> None:
@@ -449,7 +489,7 @@ class LibraryTab(QWidget):
     def selected_files(self) -> List[Dict[str, Any]]:
         if not self.ctx:
             return []
-        cat = self.ctx.store.load_catalog()
+        cat = self.ctx.store.load_manifest()
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
         path_to_file = {f.get("abs_path"): f for f in files if f.get("abs_path")}
 
@@ -555,7 +595,7 @@ class LibraryTab(QWidget):
 
         def task():
             self.ctx.catalog.scan()
-            cat = self.ctx.store.load_catalog()
+            cat = self.ctx.store.load_manifest()
             files = [e for e in cat.get("files", []) if isinstance(e, dict)]
             selected = []
             for entry in files:

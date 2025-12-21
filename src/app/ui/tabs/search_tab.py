@@ -141,8 +141,8 @@ class SearchTab(QWidget):
         if not self.ctx:
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
             return
-        index = self.ctx.store.load_index()
-        slides = index.get("slides", []) if isinstance(index, dict) else []
+        meta = self.ctx.store.load_meta()
+        slides = meta.get("slides", {}) if isinstance(meta, dict) else {}
         if not slides:
             msg = "尚未建立索引，請先在「檔案庫/索引」執行掃描與索引。"
             if hasattr(self.main_window, "show_toast"):
