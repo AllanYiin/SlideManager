@@ -387,9 +387,9 @@ class LibraryTab(QWidget):
             it = SortableItem(str(val), sort_keys[c])
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
             it.setToolTip(tooltip)
-        if status == "已索引":
-            it.setBackground(QColor("#E8F5E9"))
-        self.table.setItem(r, c, it)
+            if status == "已索引":
+                it.setBackground(QColor("#E8F5E9"))
+            self.table.setItem(r, c, it)
 
     def _status_text(self, f: Dict[str, Any]) -> str:
         return STATUS_LABELS.get(classify_doc_status(f), "未處理")
