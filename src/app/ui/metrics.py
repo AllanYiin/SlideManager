@@ -35,6 +35,27 @@ def classify_doc_status(entry: Dict[str, Any]) -> str:
             return "pending"
         if text_indexed is not None or image_indexed is not None:
             return "partial"
+        index_mode = status.get("index_mode")
+        if index_mode in ("text", "image"):
+            return "partial"
+        index_slide_count = status.get("index_slide_count")
+        text_count = status.get("text_indexed_count")
+        image_count = status.get("image_indexed_count")
+        bm25_count = status.get("bm25_indexed_count")
+        if (
+            isinstance(index_slide_count, int)
+            and index_slide_count > 0
+            and isinstance(text_count, int)
+            and isinstance(image_count, int)
+            and text_count >= index_slide_count
+            and image_count >= index_slide_count
+        ):
+            return "indexed"
+        if any(
+            isinstance(count, int) and count > 0
+            for count in (text_count, image_count, bm25_count)
+        ):
+            return "partial"
     return "indexed"
 
 
