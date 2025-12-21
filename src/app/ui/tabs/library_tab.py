@@ -62,11 +62,13 @@ class LibraryTab(QWidget):
         self._pending_metrics_refresh = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
+
         self._refresh_timer.setInterval(2000)
         self._refresh_timer.timeout.connect(self._flush_table_refresh)
         self._metrics_timer = QTimer(self)
         self._metrics_timer.setSingleShot(True)
         self._metrics_timer.setInterval(10000)
+
         self._metrics_timer.timeout.connect(self._flush_metrics_refresh)
 
         root = QHBoxLayout(self)
