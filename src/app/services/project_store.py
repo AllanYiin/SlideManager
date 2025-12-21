@@ -15,6 +15,8 @@ from app.utils.json_io import atomic_write_json, read_json
 
 log = get_logger(__name__)
 
+FLOAT_DTYPE = np.float16 if hasattr(np, "float16") else np.float32
+
 
 SCHEMA_VERSION = "2.0"
 
@@ -265,7 +267,7 @@ class ProjectStore:
         if not vectors:
             return
         existing = self._load_npz_map(delta_path)
-        existing.update({k: np.asarray(v, dtype=np.float16) for k, v in vectors.items()})
+        existing.update({k: np.asarray(v, dtype=FLOAT_DTYPE) for k, v in vectors.items()})
         self._save_npz_map(delta_path, existing)
 
     def _compact_vectors(self, snapshot_path: Path, delta_path: Path) -> None:
@@ -294,7 +296,7 @@ class ProjectStore:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp.npz")
-            np.savez_compressed(tmp, **{k: np.asarray(v, dtype=np.float16) for k, v in data.items()})
+            np.savez_compressed(tmp, **{k: np.asarray(v, dtype=FLOAT_DTYPE) for k, v in data.items()})
             tmp.replace(path)
         except Exception as exc:
             log.warning("寫入向量檔失敗：%s (%s)", path, exc)
