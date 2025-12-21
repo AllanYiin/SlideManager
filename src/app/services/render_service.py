@@ -262,6 +262,8 @@ class WindowsComRenderer:
             return
         try:
             self._powerpoint.Quit()
+        except Exception:
+            log.exception("關閉 PowerPoint 失敗")
         finally:
             self._powerpoint = None
 
