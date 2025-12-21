@@ -406,7 +406,8 @@ class IndexService:
             tok = bm25_tokens[idx] if idx < len(bm25_tokens) else []
             slide_tokens_by_id[slide_id] = tok
             if idx < len(text_vecs):
-                vec = np.asarray(text_vecs[idx], dtype=np.float16)
+                vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
+                vec = np.asarray(text_vecs[idx], dtype=vec_dtype)
                 text_vectors_to_append[slide_id] = vec
                 slide_text_vec_by_id[slide_id] = vec
             else:
