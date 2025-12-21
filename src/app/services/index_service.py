@@ -297,7 +297,11 @@ class IndexService:
                 if not wait_if_paused(fi, overall_total):
                     return 1, "已取消"
 
-                source_slide_count = len(slide_texts) if slide_texts else slide_count
+                source_slide_count = slide_count
+                if slide_texts:
+                    source_slide_count = max(source_slide_count, len(slide_texts))
+                if update_image and thumbs:
+                    source_slide_count = max(source_slide_count, len(thumbs))
                 slide_count = max(slide_count, source_slide_count)
                 if update_text and extract_elapsed > 0 and slide_count > 0:
                     extract_time += extract_elapsed
