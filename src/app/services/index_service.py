@@ -446,7 +446,7 @@ class IndexService:
                         slide.thumb_path = thumb_path
                         if update_image_vectors and thumb_path:
                             image_paths.append(Path(thumb_path))
-                            image_slide_ids.append(f\"{file_id}#{slide.page}\")
+                            image_slide_ids.append(f"{file_id}#{slide.page}")
             finally:
                 self.renderer.end_batch()
 
