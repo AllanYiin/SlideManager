@@ -296,7 +296,13 @@ class ProjectStore:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp.npz")
-            np.savez_compressed(tmp, **{k: np.asarray(v, dtype=FLOAT_DTYPE) for k, v in data.items()})
+            payload = {k: np.asarray(v, dtype=FLOAT_DTYPE) for k, v in data.items()}
+            saver = getattr(np, "savez_compressed", None)
+            if saver is None:
+                log.warning("numpy 缺少 savez_compressed，改用未壓縮 npz：%s", path)
+                np.savez(tmp, **payload)
+            else:
+                saver(tmp, **payload)
             tmp.replace(path)
         except Exception as exc:
             log.warning("寫入向量檔失敗：%s (%s)", path, exc)
