@@ -78,6 +78,25 @@ class ProjectStore:
         self.paths.thumbs_dir.mkdir(parents=True, exist_ok=True)
         self.paths.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---------------- Legacy aliases ----------------
+    def load_project(self) -> Dict[str, Any]:
+        return self.load_app_state()
+
+    def save_project(self, data: Dict[str, Any]) -> None:
+        self.save_app_state(data)
+
+    def load_catalog(self) -> Dict[str, Any]:
+        return self.load_manifest()
+
+    def save_catalog(self, data: Dict[str, Any]) -> None:
+        self.save_manifest(data)
+
+    def load_index(self) -> Dict[str, Any]:
+        return self.load_meta()
+
+    def save_index(self, data: Dict[str, Any]) -> None:
+        self.save_meta(data)
+
     # ---------------- App State ----------------
     def load_app_state(self) -> Dict[str, Any]:
         default = {
