@@ -141,6 +141,14 @@ class SearchTab(QWidget):
         if not self.ctx:
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
             return
+        index = self.ctx.store.load_index()
+        slides = index.get("slides", []) if isinstance(index, dict) else []
+        if not slides:
+            msg = "尚未建立索引，請先在「檔案庫/索引」執行掃描與索引。"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="warning", timeout_ms=12000)
+            QMessageBox.information(self, "尚未建立索引", msg)
+            return
         text = (self.query_edit.text() or "").strip()
         mode = self.mode.currentData() or self.mode.currentText()
         if not text and mode != "image":
@@ -195,7 +203,15 @@ class SearchTab(QWidget):
             except Exception:
                 image_vec = None
 
-        results = self.ctx.search.search(q, image_vec=image_vec)
+        try:
+            results = self.ctx.search.search(q, image_vec=image_vec)
+        except Exception as exc:
+            log.exception("搜尋失敗：%s", exc)
+            msg = f"搜尋失敗，請稍後再試（{exc}）"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+            QMessageBox.critical(self, "搜尋失敗", msg)
+            return
         self._last_results = results
         self.render_results()
 
