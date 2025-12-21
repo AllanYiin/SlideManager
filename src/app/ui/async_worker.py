@@ -7,6 +7,10 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
+from app.core.logging import get_logger
+
+log = get_logger(__name__)
+
 
 class WorkerSignals(QObject):
     finished = Signal(object)  # result
@@ -32,9 +36,15 @@ class Worker(QRunnable):
                 # 使用者自帶，不覆蓋
                 pass
             result = self.fn(*self.args, **self.kwargs)
-            self.signals.finished.emit(result)
-        except Exception as e:
+            self._safe_emit(self.signals.finished, result)
+        except Exception:
             import traceback
 
             tb = traceback.format_exc()
-            self.signals.error.emit(tb)
+            self._safe_emit(self.signals.error, tb)
+
+    def _safe_emit(self, signal: Signal, payload: object) -> None:
+        try:
+            signal.emit(payload)
+        except RuntimeError as exc:
+            log.warning("Signal 已被刪除，無法 emit：%s", exc)
