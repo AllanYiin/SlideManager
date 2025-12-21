@@ -36,7 +36,7 @@ class CatalogService:
         return str(Path(dir_path).resolve())
 
     def _load_whitelist(self) -> List[Dict[str, Any]]:
-        proj = self.store.load_project()
+        proj = self.store.load_app_state()
         dirs = proj.get("whitelist_dirs", [])
         normalized: List[Dict[str, Any]] = []
         for entry in dirs:
@@ -50,9 +50,9 @@ class CatalogService:
         return normalized
 
     def _save_whitelist(self, dirs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        proj = self.store.load_project()
+        proj = self.store.load_app_state()
         proj["whitelist_dirs"] = dirs
-        self.store.save_project(proj)
+        self.store.save_app_state(proj)
         return dirs
 
     def get_whitelist_dirs(self) -> List[str]:
@@ -106,7 +106,7 @@ class CatalogService:
     ) -> Dict[str, Any]:
         """掃描白名單目錄，更新 catalog.json。"""
         whitelist = self._load_whitelist()
-        existing = self.store.load_catalog().get("files", [])
+        existing = self.store.load_manifest().get("files", [])
         by_path = {e.get("abs_path"): e for e in existing if isinstance(e, dict) and e.get("abs_path")}
         touched_paths = set()
         scan_errors: List[Dict[str, Any]] = []
@@ -172,17 +172,6 @@ class CatalogService:
                             except Exception as e:
                                 log.warning("讀取 metadata 失敗：%s (%s)", path, e)
 
-                        index_status = prev.get("index_status") if prev else None
-                        if not index_status and prev:
-                            indexed = bool(prev.get("indexed"))
-                            index_status = {
-                                "indexed": indexed,
-                                "indexed_epoch": prev.get("indexed_at"),
-                                "index_mtime_epoch": prev.get("modified_time") if indexed else None,
-                                "index_slide_count": prev.get("slides_count") if indexed else 0,
-                                "last_error": None,
-                            }
-
                         entry = {
                             "file_id": file_id,
                             "abs_path": abs_path,
@@ -197,7 +186,9 @@ class CatalogService:
                             "indexed": bool(prev.get("indexed")) if prev else False,
                             "indexed_at": prev.get("indexed_at") if prev else None,
                             "slides_count": int(prev.get("slides_count", 0)) if prev else 0,
-                            "index_status": index_status,
+                            "last_error": prev.get("last_error") if prev else None,
+                            "last_index_summary": prev.get("last_index_summary") if prev else None,
+                            "index_mode": prev.get("index_mode") if prev else None,
                             "missing": False,
                         }
                         files.append(entry)
@@ -257,13 +248,14 @@ class CatalogService:
             return (-safe_mtime, item.get("filename", ""), item.get("abs_path", ""))
 
         out = {
-            "schema_version": self.store.load_catalog().get("schema_version", "1.0"),
+            "schema_version": self.store.load_manifest().get("schema_version", "1.0"),
             "files": sorted(files, key=_sort_key),
             "scanned_at": int(time.time()),
             "whitelist_dirs": whitelist,
             "scan_errors": scan_errors,
+            "stats": {},
         }
-        self.store.save_catalog(out)
+        self.store.save_manifest(out)
         return out
 
     def mark_indexed(
@@ -276,7 +268,7 @@ class CatalogService:
         bm25_indexed_count: Optional[int] = None,
         index_mode: Optional[str] = None,
     ) -> None:
-        cat = self.store.load_catalog()
+        cat = self.store.load_manifest()
         files = cat.get("files", [])
         now = int(time.time())
         for e in files:
@@ -284,59 +276,15 @@ class CatalogService:
                 e["indexed"] = True
                 e["indexed_at"] = now
                 e["slides_count"] = int(slides_count)
-                mtime = e.get("modified_time")
-                prev_status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
-                text_count = (
-                    int(text_indexed_count)
-                    if text_indexed_count is not None
-                    else prev_status.get("text_indexed_count")
-                )
-                image_count = (
-                    int(image_indexed_count)
-                    if image_indexed_count is not None
-                    else prev_status.get("image_indexed_count")
-                )
-                if isinstance(text_count, bool):
-                    text_count = None
-                if isinstance(image_count, bool):
-                    image_count = None
-                bm25_count = (
-                    int(bm25_indexed_count)
-                    if bm25_indexed_count is not None
-                    else prev_status.get("bm25_indexed_count")
-                )
-                if isinstance(bm25_count, bool):
-                    bm25_count = None
-                summary = {
-                    "slides_ok_text": text_count if isinstance(text_count, int) else 0,
-                    "slides_ok_image": image_count if isinstance(image_count, int) else 0,
-                    "slides_ok_bm25": bm25_count if isinstance(bm25_count, int) else 0,
-                    "slides_error": 0,
+                e["last_index_summary"] = {
+                    "slides_ok_text": int(text_indexed_count or 0),
+                    "slides_ok_image": int(image_indexed_count or 0),
+                    "slides_ok_bm25": int(bm25_indexed_count or 0),
                 }
-                e["index_status"] = {
-                    "indexed": True,
-                    "indexed_epoch": now,
-                    "index_mtime_epoch": int(mtime) if mtime is not None else None,
-                    "index_slide_count": int(slides_count),
-                    "text_indexed_count": text_count,
-                    "image_indexed_count": image_count,
-                    "bm25_indexed_count": bm25_count,
-                    "text_indexed": (
-                        text_count >= int(slides_count)
-                        if isinstance(text_count, int)
-                        else prev_status.get("text_indexed", None)
-                    ),
-                    "image_indexed": (
-                        image_count >= int(slides_count)
-                        if isinstance(image_count, int)
-                        else prev_status.get("image_indexed", None)
-                    ),
-                    "index_mode": index_mode or prev_status.get("index_mode"),
-                    "last_index_summary": summary,
-                    "last_error": None,
-                }
+                e["index_mode"] = index_mode
+                e["last_error"] = None
         cat["files"] = files
-        self.store.save_catalog(cat)
+        self.store.save_manifest(cat)
 
     def mark_extracted(
         self,
@@ -345,7 +293,7 @@ class CatalogService:
         *,
         index_mtime_epoch: Optional[int] = None,
     ) -> None:
-        cat = self.store.load_catalog()
+        cat = self.store.load_manifest()
         files = cat.get("files", [])
         now = int(time.time())
         for e in files:
@@ -353,67 +301,31 @@ class CatalogService:
                 e["indexed"] = True
                 e["indexed_at"] = now
                 e["slides_count"] = int(slides_count)
-                mtime = index_mtime_epoch
-                if mtime is None:
-                    mtime = e.get("modified_time")
-                prev_status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
-                status = {
-                    "indexed": True,
-                    "indexed_epoch": now,
-                    "index_mtime_epoch": int(mtime) if mtime is not None else None,
-                    "index_slide_count": int(slides_count),
-                    "text_indexed_count": 0,
-                    "image_indexed_count": 0,
-                    "bm25_indexed_count": 0,
-                    "text_indexed": False,
-                    "image_indexed": False,
-                    "index_mode": "none",
-                    "last_index_summary": {
-                        "slides_ok_text": 0,
-                        "slides_ok_image": 0,
-                        "slides_ok_bm25": 0,
-                        "slides_error": 0,
-                    },
-                    "last_error": None,
-                }
-                if prev_status:
-                    status.update({k: v for k, v in prev_status.items() if k not in status})
-                e["index_status"] = status
+                e["index_mode"] = "none"
+                e["last_error"] = None
         cat["files"] = files
-        self.store.save_catalog(cat)
+        self.store.save_manifest(cat)
 
     def mark_unindexed(self, abs_path: str) -> None:
-        cat = self.store.load_catalog()
+        cat = self.store.load_manifest()
         files = cat.get("files", [])
         for e in files:
             if isinstance(e, dict) and e.get("abs_path") == abs_path:
                 e["indexed"] = False
                 e["indexed_at"] = None
                 e["slides_count"] = 0
-                e["index_status"] = {
-                    "indexed": False,
-                    "indexed_epoch": None,
-                    "index_mtime_epoch": None,
-                    "index_slide_count": 0,
-                    "text_indexed_count": 0,
-                    "image_indexed_count": 0,
-                    "bm25_indexed_count": 0,
-                    "text_indexed": False,
-                    "image_indexed": False,
-                    "index_mode": "none",
-                    "last_index_summary": {
-                        "slides_ok_text": 0,
-                        "slides_ok_image": 0,
-                        "slides_ok_bm25": 0,
-                        "slides_error": 0,
-                    },
-                    "last_error": None,
+                e["last_index_summary"] = {
+                    "slides_ok_text": 0,
+                    "slides_ok_image": 0,
+                    "slides_ok_bm25": 0,
                 }
+                e["index_mode"] = "none"
+                e["last_error"] = None
         cat["files"] = files
-        self.store.save_catalog(cat)
+        self.store.save_manifest(cat)
 
     def mark_index_error(self, abs_path: str, code: str, message: str) -> None:
-        cat = self.store.load_catalog()
+        cat = self.store.load_manifest()
         files = cat.get("files", [])
         now = int(time.time())
         for e in files:
@@ -421,37 +333,21 @@ class CatalogService:
                 e["indexed"] = False
                 e["indexed_at"] = None
                 e["slides_count"] = 0
-                status = e.get("index_status") if isinstance(e.get("index_status"), dict) else {}
-                status.update(
-                    {
-                        "indexed": False,
-                        "indexed_epoch": None,
-                        "index_mtime_epoch": None,
-                        "index_slide_count": 0,
-                        "text_indexed_count": 0,
-                        "image_indexed_count": 0,
-                        "bm25_indexed_count": 0,
-                        "text_indexed": False,
-                        "image_indexed": False,
-                        "index_mode": "none",
-                        "last_index_summary": {
-                            "slides_ok_text": 0,
-                            "slides_ok_image": 0,
-                            "slides_ok_bm25": 0,
-                            "slides_error": 0,
-                        },
-                        "last_error": {"code": code, "message": message, "time": now},
-                    }
-                )
-                e["index_status"] = status
+                e["last_index_summary"] = {
+                    "slides_ok_text": 0,
+                    "slides_ok_image": 0,
+                    "slides_ok_bm25": 0,
+                }
+                e["index_mode"] = "none"
+                e["last_error"] = {"code": code, "message": message, "time": now}
         cat["files"] = files
-        self.store.save_catalog(cat)
+        self.store.save_manifest(cat)
 
     def clear_missing_files(self) -> int:
-        cat = self.store.load_catalog()
+        cat = self.store.load_manifest()
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
         kept = [f for f in files if not f.get("missing")]
         removed = len(files) - len(kept)
         cat["files"] = kept
-        self.store.save_catalog(cat)
+        self.store.save_manifest(cat)
         return removed

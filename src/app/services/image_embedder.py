@@ -17,9 +17,9 @@ MODEL_INPUT_SIZE = 224
 
 
 class ImageEmbedder:
-    """圖片向量（4096 維）。"""
+    """圖片向量（512 維）。"""
 
-    def __init__(self, model_path: Optional[Path] = None, dim: int = 4096):
+    def __init__(self, model_path: Optional[Path] = None, dim: int = 512):
         self.dim = int(dim)
         self.model_path = model_path
         self._ort_session = None
@@ -52,7 +52,7 @@ class ImageEmbedder:
             input_data = self._preprocess_image_bytes(image_bytes)
             embedding = self._ort_session.run([self.output_name], {self.input_name: input_data})[0]
             embedding = np.squeeze(embedding, axis=0).astype(np.float16)
-            return embedding
+            return self._align_dim(embedding)
         except Exception as exc:
             log.exception("[ONNX_ERROR] 圖片嵌入失敗 (bytes): %s", exc)
             return np.zeros((self.dim,), dtype=np.float16)
@@ -71,7 +71,7 @@ class ImageEmbedder:
                 embedding = np.asarray(embedding).astype(np.float16)
                 if embedding.ndim == 1:
                     embedding = np.expand_dims(embedding, axis=0)
-                outputs.append(embedding)
+                outputs.append(self._align_batch_dim(embedding))
             except Exception as exc:
                 log.exception("[ONNX_ERROR] 圖片嵌入失敗 (%s): %s", batch_paths, exc)
                 outputs.append(np.zeros((len(batch_paths), self.dim), dtype=np.float16))
@@ -90,6 +90,25 @@ class ImageEmbedder:
         img_np = (img_np - 127.5) / 127.5
         img_np = img_np.transpose(2, 0, 1)
         return np.expand_dims(img_np, axis=0)
+
+    def _align_dim(self, vec: np.ndarray) -> np.ndarray:
+        v = np.asarray(vec, dtype=np.float16).reshape(-1)
+        if v.size == self.dim:
+            return v
+        if v.size > self.dim:
+            return v[: self.dim]
+        pad = np.zeros((self.dim - v.size,), dtype=np.float16)
+        return np.concatenate([v, pad], axis=0)
+
+    def _align_batch_dim(self, batch: np.ndarray) -> np.ndarray:
+        if batch.ndim != 2:
+            return np.zeros((0, self.dim), dtype=np.float16)
+        if batch.shape[1] == self.dim:
+            return batch
+        if batch.shape[1] > self.dim:
+            return batch[:, : self.dim]
+        pad = np.zeros((batch.shape[0], self.dim - batch.shape[1]), dtype=np.float16)
+        return np.concatenate([batch, pad], axis=1)
 
     @staticmethod
     def _preprocess_image(img_path: Path) -> np.ndarray:
@@ -187,9 +206,31 @@ class ImageEmbeddingService:
     def embed_image_bytes(self, image_bytes: bytes, *, dim: int) -> np.ndarray:
         if not self._embedder:
             return np.zeros((dim,), dtype=np.float32)
-        return self._embedder.embed_image_bytes(image_bytes).astype(np.float32)
+        return self._align_dim(self._embedder.embed_image_bytes(image_bytes), dim).astype(np.float32)
 
     def embed_images(self, image_paths: List[Path], *, dim: int, batch_size: int = 16) -> np.ndarray:
         if not self._embedder:
             return np.zeros((len(image_paths), dim), dtype=np.float32)
-        return self._embedder.embed_images(image_paths, batch_size=batch_size).astype(np.float32)
+        batch = self._embedder.embed_images(image_paths, batch_size=batch_size).astype(np.float32)
+        return self._align_batch_dim(batch, dim)
+
+    @staticmethod
+    def _align_dim(vec: np.ndarray, dim: int) -> np.ndarray:
+        v = np.asarray(vec, dtype=np.float32).reshape(-1)
+        if v.size == dim:
+            return v
+        if v.size > dim:
+            return v[:dim]
+        pad = np.zeros((dim - v.size,), dtype=np.float32)
+        return np.concatenate([v, pad], axis=0)
+
+    @staticmethod
+    def _align_batch_dim(batch: np.ndarray, dim: int) -> np.ndarray:
+        if batch.ndim != 2:
+            return np.zeros((0, dim), dtype=np.float32)
+        if batch.shape[1] == dim:
+            return batch
+        if batch.shape[1] > dim:
+            return batch[:, :dim]
+        pad = np.zeros((batch.shape[0], dim - batch.shape[1]), dtype=np.float32)
+        return np.concatenate([batch, pad], axis=1)

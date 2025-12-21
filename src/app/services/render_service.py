@@ -326,14 +326,14 @@ class RenderService:
             "status": {r.name: r.status_message() for r in self._renderers},
         }
 
-    def render_pptx(self, pptx_path: Path, file_hash: str, slides_count: int) -> RenderResult:
+    def render_pptx(self, pptx_path: Path, file_id: str, slides_count: int) -> RenderResult:
         available = [r for r in self._renderers if r.available()]
         if not available:
             return RenderResult(ok=False, thumbs=[], message="未偵測到可用的 renderer，已改為純文字索引")
 
         renderer = available[0]
         try:
-            thumbs = self._render_with_renderer(renderer, pptx_path, file_hash)
+            thumbs = self._render_with_renderer(renderer, pptx_path, file_id)
             if thumbs:
                 return RenderResult(ok=True, thumbs=thumbs, message=f"已使用 {renderer.name} 渲染縮圖")
             return RenderResult(ok=False, thumbs=[], message=f"{renderer.name} 未產生縮圖，已改為純文字索引")
@@ -357,8 +357,10 @@ class RenderService:
         if hasattr(renderer, "end_batch"):
             renderer.end_batch()
 
-    def _thumb_path(self, file_hash: str, page: int) -> Path:
-        return self.thumbs_dir / f"{file_hash}_p{page:04d}.png"
+    def _thumb_path(self, file_id: str, page: int) -> Path:
+        target_dir = self.thumbs_dir / file_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir / f"{page}.png"
 
     @staticmethod
     def _target_thumb_size(size: Tuple[int, int]) -> Tuple[int, int]:
@@ -383,13 +385,13 @@ class RenderService:
             img.save(dst, format="PNG", optimize=True)
         return True
 
-    def _render_with_renderer(self, renderer: Renderer, pptx_path: Path, file_hash: str) -> List[Path]:
+    def _render_with_renderer(self, renderer: Renderer, pptx_path: Path, file_id: str) -> List[Path]:
         with tempfile.TemporaryDirectory() as td:
             outdir = Path(td)
             pngs = renderer.render(pptx_path, outdir)
             thumbs: List[Path] = []
             for idx, src in enumerate(pngs, start=1):
-                dst = self._thumb_path(file_hash, idx)
+                dst = self._thumb_path(file_id, idx)
                 try:
                     if not self._resize_thumb(src, dst):
                         continue

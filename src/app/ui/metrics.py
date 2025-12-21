@@ -2,61 +2,46 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
-def classify_doc_status(entry: Dict[str, Any]) -> str:
+def classify_doc_status(
+    entry: Dict[str, Any],
+    *,
+    slides: List[Dict[str, Any]],
+    meta_file: Dict[str, Any] | None,
+) -> str:
     if entry.get("missing"):
         return "missing"
-    status = entry.get("index_status") if isinstance(entry.get("index_status"), dict) else {}
-    if status.get("last_error"):
+    if entry.get("last_error"):
         return "error"
-    indexed = bool(status.get("indexed")) if status else bool(entry.get("indexed"))
-    if not indexed:
+    if not meta_file:
         return "pending"
     mtime = int(entry.get("modified_time") or 0)
-    index_mtime = int(status.get("index_mtime_epoch") or 0)
-    slide_count = entry.get("slide_count")
-    index_slide_count = status.get("index_slide_count")
-    if mtime > index_mtime:
+    last_text = int(meta_file.get("last_text_extract_at") or 0)
+    last_image = int(meta_file.get("last_image_index_at") or 0)
+    if mtime > last_text or mtime > last_image:
         return "stale"
-    if slide_count is not None and index_slide_count is not None:
-        try:
-            if int(slide_count) != int(index_slide_count):
-                return "stale"
-        except Exception:
-            return "stale"
-    if status:
-        text_indexed = status.get("text_indexed")
-        image_indexed = status.get("image_indexed")
-        if text_indexed is True and image_indexed is True:
-            return "indexed"
-        if text_indexed is False and image_indexed is False:
-            return "pending"
-        if text_indexed is not None or image_indexed is not None:
-            return "partial"
-        index_mode = status.get("index_mode")
-        if index_mode in ("text", "image"):
-            return "partial"
-        index_slide_count = status.get("index_slide_count")
-        text_count = status.get("text_indexed_count")
-        image_count = status.get("image_indexed_count")
-        bm25_count = status.get("bm25_indexed_count")
-        if (
-            isinstance(index_slide_count, int)
-            and index_slide_count > 0
-            and isinstance(text_count, int)
-            and isinstance(image_count, int)
-            and text_count >= index_slide_count
-            and image_count >= index_slide_count
-        ):
-            return "indexed"
-        if any(
-            isinstance(count, int) and count > 0
-            for count in (text_count, image_count, bm25_count)
-        ):
-            return "partial"
-    return "indexed"
+
+    slide_count = entry.get("slide_count")
+    try:
+        slide_total = int(slide_count) if slide_count is not None else len(slides)
+    except Exception:
+        slide_total = len(slides)
+    if slide_total <= 0:
+        return "pending"
+
+    flags = [s.get("flags", {}) for s in slides if isinstance(s.get("flags"), dict)]
+    if not flags:
+        return "pending"
+    text_vec = sum(1 for f in flags if f.get("has_text_vec"))
+    image_vec = sum(1 for f in flags if f.get("has_image_vec"))
+    any_done = sum(1 for f in flags if f.get("has_text") or f.get("has_image") or f.get("has_bm25"))
+    if text_vec >= slide_total and image_vec >= slide_total:
+        return "indexed"
+    if any_done > 0 or text_vec > 0 or image_vec > 0:
+        return "partial"
+    return "pending"
 
 
 STATUS_LABELS = {

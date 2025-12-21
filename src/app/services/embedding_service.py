@@ -22,7 +22,7 @@ log = get_logger(__name__)
 class EmbeddingConfig:
     text_model: str = "text-embedding-3-small"
     text_dim: int = 1536
-    image_dim: int = 4096
+    image_dim: int = 512
 
 
 class EmbeddingService:

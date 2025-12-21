@@ -9,7 +9,7 @@
 * 以「目錄白名單」掃描本機 `.pptx` 並產生清單：可行（標準檔案系統操作）。
 * 讀取 PPTX 文字與 metadata：可行（`python-pptx` 可讀 core properties、shape text）。
 * 文字向量化：可行（OpenAI Embeddings API）。
-* 縮圖 → 2048 向量：可行（`onnxruntime` + 自訂 CNN ONNX）。
+* 縮圖 → 512 向量：可行（`onnxruntime` + 自訂 CNN ONNX）。
 * 小規模（數千筆）混合搜尋（BM25 + 向量）：可行（BM25 用 `rank-bm25` 或簡易實作；向量用 brute-force cosine 即可）。
 
 **風險/限制（需在規格中明確）：**
@@ -31,7 +31,7 @@
 
 1. 依白名單目錄列出所有 PPTX，顯示名稱、metadata、索引狀態。
 2. 只對「未索引」或「檔案修改日晚於索引日」的投影片進行（重）索引。
-3. 索引每頁：抽文字、產縮圖、文字 embedding、縮圖 embedding（2048）、並支援：
+3. 索引每頁：抽文字、產縮圖、文字 embedding、縮圖 embedding（512）、並支援：
 
    * **搜文字**、**搜圖**、**搜整體（concat 向量）**
    * **混合搜尋（BM25 + 向量）**
@@ -160,7 +160,7 @@
   <text x="714" y="272" font-size="13" font-family="Arial" fill="#1E293B">OpenAIClient (Embeddings/Chat)</text>
 
   <rect x="700" y="296" width="220" height="44" rx="10" fill="#FFF7ED" stroke="#FDBA74"/>
-  <text x="714" y="324" font-size="13" font-family="Arial" fill="#1E293B">OnnxRuntimeAdapter (2048-d)</text>
+  <text x="714" y="324" font-size="13" font-family="Arial" fill="#1E293B">OnnxRuntimeAdapter (512-d)</text>
 
   <rect x="700" y="348" width="220" height="44" rx="10" fill="#FFF7ED" stroke="#FDBA74"/>
   <text x="714" y="376" font-size="13" font-family="Arial" fill="#1E293B">Logger + Tokenizer</text>
@@ -175,89 +175,97 @@
 
 ### 5. 資料模型與持久化（JSON）
 
-> 原則：**可續跑**、**可版本遷移**、**新增必有刪/改流程**、**不依賴 numpy 檔案格式**。
+> 原則：**可續跑**、**可版本遷移**、**新增必有刪/改流程**、**向量採 npz 快照 + delta**。
 
-#### 5.1 專案目錄結構（建議）
+#### 5.1 專案目錄結構（方案 A：集中式 + 型態拆分）
 
 * `{project_root}/`
 
-  * `project.json`（全域設定 + 版本）
-  * `catalog.json`（檔案清單 + metadata + 索引狀態）
-  * `index.json`（slide-level 索引：文字、向量、thumbnail 路徑、token）
-  * `thumbs/`（縮圖檔案，`{file_id}/{slide_id}.png`）
+  * `app_state.json`（白名單 / UI / 最近查詢）
+  * `manifest.json`（文件清單 + slide_count + 全域統計快取）
+  * `meta.json`（所有 file/slide 的非向量資訊）
+  * `meta.log`（JSONL 追加式更新記錄，定期 compact）
+  * `vec_text_fp16.npz`（文字向量快照）
+  * `vec_text_delta_fp16.npz`（文字向量增量）
+  * `vec_image_fp16.npz`（圖像向量快照, 512d）
+  * `vec_image_delta_fp16.npz`（圖像向量增量）
+  * `cache/thumbs/<file_id>/<n>.png`（縮圖 cache）
   * `cache/`（OpenAI 回應快取、ONNX 模型檔）
 
-#### 5.2 Catalog（檔案層）
+#### 5.2 App State（白名單 / UI）
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "whitelist_dirs": [
     {"path": "/Users/me/slides", "enabled": true, "recursive": true}
   ],
-  "files": [
-    {
-      "file_id": "sha1(normalized_path)",
-      "path": "/Users/me/slides/A.pptx",
-      "filename": "A.pptx",
-      "size_bytes": 1234567,
-      "mtime_epoch": 1730000000,
-      "slide_count": 42,
-      "core_properties": {
-        "title": "Q3 Review",
-        "author": "Amy",
-        "created_epoch": 1729000000,
-        "modified_epoch": 1730000000
-      },
-      "index_status": {
-        "indexed": true,
-        "indexed_epoch": 1730001000,
-        "index_mtime_epoch": 1730000000,
-        "index_slide_count": 42,
-        "last_error": null
-      }
-    }
-  ]
+  "recent_queries": []
 }
 ```
 
-#### 5.3 Index（投影片頁層）
-
-> 每頁同時保存：`title_text`、`body_text`、`bm25_tokens`、`text_embedding`、`image_embedding(2048)`、`concat_embedding`、`thumb_path`
-
-向量存法（兩種擇一）：
-
-* **A. list-of-floats**（最直覺、檔案較大）
-* **B. base64 bytes（float32 little-endian）**（較小、較快、仍是 JSON）
+#### 5.3 Manifest（檔案清單 + 快取）
 
 ```json
 {
-  "schema_version": "1.0",
-  "embedding": {
-    "text_model": "text-embedding-3-large",
-    "text_dim": 3072,
-    "image_dim": 2048,
-    "concat_dim": 5120,
-    "vector_encoding": "base64_f32"
-  },
-  "slides": [
+  "schema_version": "2.0",
+  "files": [
     {
-      "slide_uid": "file_id#slide_index",
-      "file_id": "....",
-      "slide_index": 12,
-      "title_text": "Market Overview",
-      "body_text": "....",
-      "all_text": "Market Overview\n....",
-      "bm25_tokens": ["market","overview","..."],
-      "thumb_path": "thumbs/<file_id>/12.png",
-      "text_vec": "BASE64...",
-      "image_vec": "BASE64...",
-      "concat_vec": "BASE64...",
-      "indexed_epoch": 1730001200
+      "file_id": "sha256(abs_path)",
+      "abs_path": "/Users/me/slides/A.pptx",
+      "filename": "A.pptx",
+      "size": 1234567,
+      "modified_time": 1730000000,
+      "slide_count": 42
     }
-  ]
+  ],
+  "stats": {}
 }
 ```
+
+#### 5.4 Meta（slide 層資料 + flags）
+
+```json
+{
+  "schema_version": "2.0",
+  "files": {
+    "file_abc": {
+      "path": ".../a.pptx",
+      "name": "a.pptx",
+      "mtime": 1766283612,
+      "size": 123456,
+      "slide_count": 28,
+      "last_text_extract_at": 1766284800,
+      "last_image_index_at": 1766284900
+    }
+  },
+  "slides": {
+    "file_abc#1": {
+      "file_id": "file_abc",
+      "slide_no": 1,
+      "title": "...",
+      "body_text": "...",
+      "text_for_bm25": "...",
+      "bm25_tokens": ["..."],
+      "thumbnail_path": "cache/thumbs/file_abc/1.png",
+      "flags": {
+        "has_text": true,
+        "has_image": false,
+        "has_text_vec": true,
+        "has_image_vec": false,
+        "has_bm25": true
+      },
+      "updated_at": 1766284800
+    }
+  }
+}
+```
+
+#### 5.5 向量持久化（快照 + 增量）
+
+* `vec_text_fp16.npz` 與 `vec_text_delta_fp16.npz` 合併為文字向量來源。
+* `vec_image_fp16.npz` 與 `vec_image_delta_fp16.npz` 合併為圖像向量來源。
+* 啟動時載入快照 + 增量；背景 compact 產生新快照並原子替換。
 
 ---
 
@@ -265,10 +273,10 @@
 
 #### 6.1 掃描清單（CatalogService）
 
-1. 讀取 `project.json` → whitelist_dirs
+1. 讀取 `app_state.json` → whitelist_dirs
 2. 遍歷目錄（enabled + recursive）找 `.pptx`
 3. 對每個檔案取得：path、size、mtime
-4. 若檔案新出現 → 建立 file entry
+4. 若檔案新出現 → 建立 manifest file entry
 5. 若原有 entry path 不存在 → 標記 missing（不立刻刪，給 UI 做清理）
 6. 讀取 metadata（`python-pptx` core properties、slide_count）→ 背景執行、可中斷
 
@@ -276,29 +284,22 @@
 
 符合任一條件就排入索引：
 
-* `indexed=false`
-* 或 `file.mtime_epoch > file.index_status.index_mtime_epoch`
+* `meta.files` 未存在
+* 或 `file.mtime > meta.files.last_text_extract_at`
+* 或 `file.mtime > meta.files.last_image_index_at`
 * 或 `slide_count` 變動（可能新增/刪除頁）
-
-索引完成後更新：
-
-* `indexed=true`
-* `indexed_epoch=now`
-* `index_mtime_epoch=file.mtime_epoch`
-* `index_slide_count=slide_count`
 
 #### 6.3 建立索引（Extraction + Render + Embedding）
 
-對每個待索引 file：
+對每個待索引 file（先文字、後圖片）：
 
-1. **抽取文字**：逐頁讀 shapes 文字（title/內文），合併成 `all_text`
-2. **渲染縮圖**：Renderer 產生每頁 PNG（失敗時允許只做文字索引，但需在狀態顯示）
-3. **文字向量**：OpenAI embeddings（批次、快取、重試）
-4. **圖片向量**：ONNX 2048-d（模型下載 → cache → 載入 → 推論）
-5. **向量拼接**：`concat_vec = [text_vec, image_vec]`
-6. **BM25 tokens**：對 `all_text` tokenize → 儲存 tokens
-7. 寫入 `index.json`（原子寫入：先寫 temp 再 replace）
-8. 更新 `catalog.json` 的 index_status
+1. **抽取文字**：PPTX 當 zip，直接讀 `ppt/slides/slide*.xml` 抽文字
+2. **BM25 tokens**：對文字 tokenize → `has_bm25=true`
+3. **文字向量**：OpenAI embeddings（批次、快取、重試）→ `vec_text_delta_fp16.npz`
+4. **渲染縮圖**：Renderer 產生每頁 PNG（失敗時允許只做文字索引，但需在狀態顯示）
+5. **圖片向量**：ONNX 512-d → `vec_image_delta_fp16.npz`
+6. 更新 `meta.json` flags（has_text / has_image / has_text_vec / has_image_vec / has_bm25）
+7. 更新 `manifest.json`（檔案層索引摘要）
 
 > **Streaming 規範**：Chat Tab 的 LLM 回覆必須 streaming；索引進度也需以「逐步事件」推送 UI（progress events）。
 
@@ -314,10 +315,10 @@
   * Text Vector：query embedding 與 `text_vec` cosine
 * **Image Search**
 
-  * image query → ONNX 2048 → cosine 對 `image_vec`
+  * image query → ONNX 512 → cosine 對 `image_vec`
 * **Overall Vector**
 
-  * query concat（text + image）→ cosine 對 `concat_vec`
+  * query concat（text + image）→ runtime concat 對齊向量
 * **Hybrid（預設）**
 
   * `score = w_bm25 * norm(bm25) + w_vec * norm(vec_cosine)`
@@ -465,7 +466,7 @@
 * 索引時檔案被使用者打開並另存 → mtime 變動：當輪索引結束後應再次檢查 mtime，若變更則標記「需再索引」
 * 文字抽取為空（只有圖）→ 仍可做圖片索引
 * 縮圖生成失敗 → 仍可文字索引，並在結果列表標「無縮圖」
-* JSON 過大：提供「只保存 concat_vec」或「base64 encoding」開關
+* 向量過大：改用 npz 快照 + delta，避免 JSON 膨脹
 * Chat 對話中連續詢問：必須可取消上一個 streaming 回覆
 
 ---

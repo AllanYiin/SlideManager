@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -12,7 +11,7 @@ from app.core.logging import get_logger
 from app.services.embedding_service import EmbeddingConfig, EmbeddingService
 from app.services.project_store import ProjectStore
 from app.utils.text import tokenize
-from app.utils.vectors import b64_f32_to_vec, cosine_similarity, normalize_l2
+from app.utils.vectors import cosine_similarity, normalize_l2
 
 log = get_logger(__name__)
 
@@ -37,42 +36,48 @@ class SearchResult:
 class SearchService:
     def __init__(self, store: ProjectStore, api_key: Optional[str]):
         self.store = store
-        idx = self.store.load_index()
-        emb = idx.get("embedding", {})
+        manifest = self.store.load_manifest()
+        emb = manifest.get("embedding", {})
         self.emb_cfg = EmbeddingConfig(
             text_model=str(emb.get("text_model", "text-embedding-3-small")),
             text_dim=int(emb.get("text_dim", 1536)),
-            image_dim=int(emb.get("image_dim", 4096)),
+            image_dim=int(emb.get("image_dim", 512)),
         )
         self.embeddings = EmbeddingService(api_key, self.emb_cfg, cache_dir=self.store.paths.cache_dir)
 
     def search(self, q: SearchQuery, image_vec: Optional[np.ndarray] = None) -> List[SearchResult]:
-        index = self.store.load_index()
-        slides = [s for s in index.get("slides", []) if isinstance(s, dict)]
+        meta = self.store.load_meta()
+        files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
+        slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+        slides = self._build_slide_views(slides_map, files)
         if not slides:
             return []
 
-        # BM25
+        text_vectors = self.store.load_text_vectors()
+        image_vectors = self.store.load_image_vectors()
+
         bm25_scores = self._bm25_scores(slides, q.text)
 
-        # Vector
         vec_scores = [0.0] * len(slides)
         qv_text: Optional[np.ndarray] = None
         if q.mode in {"text", "hybrid", "overall"}:
             qv_text = self.embeddings.embed_text(q.text)
 
         if q.mode == "text" and qv_text is not None:
-            vec_scores = self._vector_scores(slides, qv_text, use_concat=False)
-        elif q.mode == "overall":
+            vec_scores = self._vector_scores(slides, qv_text, text_vectors, image_vectors, use_concat=False)
+        elif q.mode in {"overall", "hybrid"}:
             qv_concat = self._build_concat_query(qv_text, image_vec)
-            vec_scores = self._vector_scores(slides, qv_concat, use_concat=True)
-        elif q.mode == "hybrid":
-            qv_concat = self._build_concat_query(qv_text, image_vec)
-            vec_scores = self._vector_scores(slides, qv_concat, use_concat=True)
+            vec_scores = self._vector_scores(slides, qv_concat, text_vectors, image_vectors, use_concat=True)
         elif q.mode == "image" and image_vec is not None:
-            vec_scores = self._vector_scores(slides, image_vec, use_concat=False, use_image=True)
+            vec_scores = self._vector_scores(
+                slides,
+                image_vec,
+                text_vectors,
+                image_vectors,
+                use_concat=False,
+                use_image=True,
+            )
 
-        # Normalize
         bm_n = self._minmax_norm(bm25_scores)
         vec_n = self._cosine_norm(vec_scores)
 
@@ -95,16 +100,15 @@ class SearchService:
         try:
             from rank_bm25 import BM25Okapi
         except Exception:
-            # 退化：純 token overlap
             qset = set(tokenize(query_text))
             out = []
             for s in slides:
-                toks = s.get("bm25_tokens") or tokenize(s.get("all_text", ""))
+                toks = s.get("bm25_tokens") or tokenize(s.get("text_for_bm25", ""))
                 tset = set(toks)
                 out.append(float(len(qset & tset)))
             return out
 
-        corpus = [s.get("bm25_tokens") or tokenize(s.get("all_text", "")) for s in slides]
+        corpus = [s.get("bm25_tokens") or tokenize(s.get("text_for_bm25", "")) for s in slides]
         bm25 = BM25Okapi(corpus)
         qtok = tokenize(query_text)
         scores = bm25.get_scores(qtok)
@@ -114,6 +118,8 @@ class SearchService:
         self,
         slides: List[Dict[str, Any]],
         query_vec: np.ndarray,
+        text_vectors: Dict[str, np.ndarray],
+        image_vectors: Dict[str, np.ndarray],
         *,
         use_concat: bool = False,
         use_image: bool = False,
@@ -122,24 +128,28 @@ class SearchService:
         out: List[float] = []
         for s in slides:
             try:
+                slide_id = s.get("slide_id")
                 if use_image:
-                    b = s.get("image_vec")
-                    if not b:
+                    v = image_vectors.get(slide_id)
+                    if v is None:
                         out.append(0.0)
                         continue
-                    v = b64_f32_to_vec(b, self.emb_cfg.image_dim)
                 elif use_concat:
-                    b = s.get("concat_vec")
-                    if not b:
+                    tv = text_vectors.get(slide_id)
+                    iv = image_vectors.get(slide_id)
+                    if tv is None and iv is None:
                         out.append(0.0)
                         continue
-                    v = b64_f32_to_vec(b, self.emb_cfg.text_dim + self.emb_cfg.image_dim)
+                    if tv is None:
+                        tv = np.zeros((self.emb_cfg.text_dim,), dtype=np.float32)
+                    if iv is None:
+                        iv = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
+                    v = np.concatenate([tv.astype(np.float32), iv.astype(np.float32)], axis=0)
                 else:
-                    b = s.get("text_vec")
-                    if not b:
+                    v = text_vectors.get(slide_id)
+                    if v is None:
                         out.append(0.0)
                         continue
-                    v = b64_f32_to_vec(b, self.emb_cfg.text_dim)
                 out.append(cosine_similarity(qv, v))
             except Exception:
                 out.append(0.0)
@@ -169,3 +179,31 @@ class SearchService:
         if image_vec is None:
             image_vec = np.zeros((self.emb_cfg.image_dim,), dtype=np.float32)
         return np.concatenate([text_vec, image_vec], axis=0)
+
+    @staticmethod
+    def _build_slide_views(
+        slides_map: Dict[str, Any],
+        files: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        slides: List[Dict[str, Any]] = []
+        for slide_id, slide in slides_map.items():
+            if not isinstance(slide, dict):
+                continue
+            file_id = slide.get("file_id")
+            file_entry = files.get(file_id, {}) if isinstance(files.get(file_id), dict) else {}
+            slides.append(
+                {
+                    "slide_id": slide_id,
+                    "file_id": file_id,
+                    "file_path": file_entry.get("path", ""),
+                    "filename": file_entry.get("name", ""),
+                    "page": slide.get("slide_no"),
+                    "title": slide.get("title", ""),
+                    "text_for_bm25": slide.get("text_for_bm25", ""),
+                    "all_text": slide.get("text_for_bm25", ""),
+                    "bm25_tokens": slide.get("bm25_tokens", []),
+                    "thumb_path": slide.get("thumbnail_path"),
+                    "flags": slide.get("flags", {}),
+                }
+            )
+        return slides
