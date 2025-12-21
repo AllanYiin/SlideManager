@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
 
 import sys
-import importlib.util
 import unittest
 from pathlib import Path
-
-if importlib.util.find_spec("numpy") is None:
-    raise unittest.SkipTest("numpy 未安裝，跳過 vectors 測試。")
 
 import numpy as np
 

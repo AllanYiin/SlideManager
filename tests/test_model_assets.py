@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 
-import importlib.util
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Iterable, List, Optional
 from unittest.mock import patch
-
-if importlib.util.find_spec("requests") is None:
-    raise unittest.SkipTest("requests 未安裝，跳過 model_assets 測試。")
 
 from requests.cookies import RequestsCookieJar
 
