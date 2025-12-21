@@ -67,11 +67,7 @@ def _download_from_google_drive(
     params = {"id": file_id, "export": "download"}
     session = requests.Session()
 
-    try:
-        response = session.get(url, params=params, stream=True, timeout=30)
-    except requests.RequestException as exc:
-        log.exception("Google Drive 下載請求失敗：%s", exc)
-        raise RuntimeError("Google Drive 下載請求失敗") from exc
+    response = _request_drive(session, url, params=params)
 
     if response.status_code != 200:
         raise RuntimeError(f"Google Drive 回應碼 {response.status_code}")
@@ -79,20 +75,22 @@ def _download_from_google_drive(
     token = _get_confirm_token(response)
     if not token and _is_html_response(response):
         token = _extract_confirm_token_from_html(response.text)
-        if not token:
-            raise RuntimeError("Google Drive 回傳警示頁面，請確認檔案分享權限")
 
     if token:
         params["confirm"] = token
-        try:
-            response = session.get(url, params=params, stream=True, timeout=30)
-        except requests.RequestException as exc:
-            log.exception("Google Drive 確認下載請求失敗：%s", exc)
-            raise RuntimeError("Google Drive 確認下載請求失敗") from exc
+        response = _request_drive(session, url, params=params, error_message="Google Drive 確認下載請求失敗")
         if response.status_code != 200:
             raise RuntimeError(f"確認後下載仍失敗，回應碼 {response.status_code}")
+
+    if _is_html_response(response):
+        download_url = _extract_download_url_from_html(response.text)
+        if download_url:
+            response = _request_drive(session, download_url, error_message="Google Drive 轉向下載失敗")
         if _is_html_response(response):
-            raise RuntimeError("Google Drive 仍回傳警示頁面，請確認檔案分享權限")
+            raise RuntimeError(
+                "Google Drive 回傳警示頁面，請確認檔案分享權限，或手動下載後放到："
+                f"{target_path}"
+            )
 
     total = int(response.headers.get("Content-Length") or 0)
     downloaded = 0
@@ -139,6 +137,31 @@ def _extract_confirm_token_from_html(html: str) -> Optional[str]:
     if match:
         return match.group(1)
     return None
+
+
+def _extract_download_url_from_html(html: str) -> Optional[str]:
+    match = re.search(r'href="(https?://[^"]*export=download[^"]+)"', html)
+    if match:
+        return match.group(1).replace("&amp;", "&")
+    match = re.search(r'href="(/[^"]*export=download[^"]+)"', html)
+    if match:
+        return f"https://drive.google.com{match.group(1).replace('&amp;', '&')}"
+    return None
+
+
+def _request_drive(
+    session: requests.Session,
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    error_message: str = "Google Drive 下載請求失敗",
+) -> requests.Response:
+    try:
+        response = session.get(url, params=params, stream=True, timeout=30)
+    except requests.RequestException as exc:
+        log.exception("%s：%s", error_message, exc)
+        raise RuntimeError(error_message) from exc
+    return response
 
 
 def _is_html_response(response: requests.Response) -> bool:
