@@ -30,7 +30,20 @@ def atomic_write_json(path: Path, data: object, *, keep_bak: bool = True) -> Non
         except Exception as e:
             log.warning("寫入 .bak 失敗：%s", e)
 
-    tmp.replace(path)
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            tmp.replace(path)
+            last_err = None
+            break
+        except PermissionError as e:
+            last_err = e
+            log.warning("原子寫入重試中（%s/3）：%s", attempt, e)
+            time.sleep(0.2 * attempt)
+
+    if last_err is not None:
+        log.exception("原子寫入 JSON 失敗：%s (%s)", path, last_err)
+        raise last_err
 
 
 def read_json(path: Path, default: object) -> object:
