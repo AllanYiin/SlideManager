@@ -243,7 +243,7 @@ class DashboardTab(QWidget):
         slide_indexed = sum(
             1
             for s in slides
-            if s.get("indexed_at") and s.get("file_path") in doc_paths
+            if self._is_slide_indexed(s, doc_paths)
         )
 
         text_dim = int(index.get("embedding", {}).get("text_dim") or 1536)
@@ -324,6 +324,22 @@ class DashboardTab(QWidget):
         except Exception:
             return False
         return len(raw) == expected_dim * 4
+
+    def _is_slide_indexed(self, slide: Dict[str, Any], doc_paths: set[str]) -> bool:
+        if slide.get("file_path") not in doc_paths:
+            return False
+        if slide.get("indexed_at"):
+            return True
+        for key in ("text_index_status", "image_index_status", "bm25_index_status"):
+            if slide.get(key) == "ok":
+                return True
+        bm25_tokens = slide.get("bm25_tokens")
+        if isinstance(bm25_tokens, list) and bm25_tokens:
+            return True
+        for key in ("text_vec", "image_vec", "concat_vec", "thumb_path"):
+            if slide.get(key):
+                return True
+        return False
 
     def _build_kpi_card(self, title: str) -> tuple[QFrame, QLabel]:
         frame = ClickableFrame(self._clear_filters)
