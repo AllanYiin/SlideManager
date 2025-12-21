@@ -76,7 +76,7 @@ class EmbeddingService:
                 if idx < len(vecs):
                     v = self._align_dim(np.asarray(vecs[idx], dtype=np.float32))
                     out[pos] = normalize_l2(v)
-                    self._cache[self._cache_key(t)] = v.tolist()
+                    self._cache[self._cache_key(t)] = np.asarray(v, dtype=np.float32).tolist()
                 else:
                     out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
             self._save_cache()
