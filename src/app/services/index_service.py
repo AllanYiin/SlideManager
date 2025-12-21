@@ -467,8 +467,9 @@ class IndexService:
                 except Exception as exc:
                     log.warning("圖片向量批次產生失敗：%s", exc)
                     image_vecs = np.zeros((len(image_paths), self.emb_cfg.image_dim), dtype=np.float32)
+                image_vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
                 image_vectors_to_append = {
-                    slide_id: np.asarray(vec, dtype=np.float16)
+                    slide_id: np.asarray(vec, dtype=image_vec_dtype)
                     for slide_id, vec in zip(image_slide_ids, image_vecs)
                 }
                 if image_vectors_to_append:
