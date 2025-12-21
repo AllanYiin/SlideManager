@@ -11,6 +11,20 @@ from app.core.logging import get_logger
 log = get_logger(__name__)
 
 
+def _cleanup_bak_files(path: Path, *, keep: int = 5) -> None:
+    if keep <= 0:
+        return
+    pattern = f"{path.name}.*.bak"
+    candidates = sorted(path.parent.glob(pattern))
+    if len(candidates) <= keep:
+        return
+    for bak in candidates[:-keep]:
+        try:
+            bak.unlink()
+        except Exception as e:
+            log.warning("刪除舊備份失敗：%s (%s)", bak, e)
+
+
 def atomic_write_json(path: Path, data: object, *, keep_bak: bool = True) -> None:
     """原子寫入 JSON：先寫 temp 再 replace。
 
@@ -27,6 +41,7 @@ def atomic_write_json(path: Path, data: object, *, keep_bak: bool = True) -> Non
         bak = path.with_suffix(path.suffix + f".{ts}.bak")
         try:
             bak.write_bytes(path.read_bytes())
+            _cleanup_bak_files(path, keep=5)
         except Exception as e:
             log.warning("寫入 .bak 失敗：%s", e)
 
