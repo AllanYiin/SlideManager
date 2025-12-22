@@ -30,12 +30,24 @@ class ProjectPaths:
         return self.root / "app_state.json"
 
     @property
+    def project_json(self) -> Path:
+        return self.root / "project.json"
+
+    @property
     def manifest_json(self) -> Path:
         return self.root / "manifest.json"
 
     @property
+    def catalog_json(self) -> Path:
+        return self.root / "catalog.json"
+
+    @property
     def meta_json(self) -> Path:
         return self.root / "meta.json"
+
+    @property
+    def index_json(self) -> Path:
+        return self.root / "index.json"
 
     @property
     def meta_log(self) -> Path:
@@ -82,21 +94,40 @@ class ProjectStore:
 
     # ---------------- Legacy aliases ----------------
     def load_project(self) -> Dict[str, Any]:
+        data = read_json(self.paths.project_json, {})
+        if isinstance(data, dict) and data:
+            return self._migrate_app_state(data)
         return self.load_app_state()
 
     def save_project(self, data: Dict[str, Any]) -> None:
+        data = dict(data)
+        data["schema_version"] = SCHEMA_VERSION
+        atomic_write_json(self.paths.project_json, data)
         self.save_app_state(data)
 
     def load_catalog(self) -> Dict[str, Any]:
+        data = read_json(self.paths.catalog_json, {})
+        if isinstance(data, dict) and data:
+            return self._migrate_manifest(data)
         return self.load_manifest()
 
     def save_catalog(self, data: Dict[str, Any]) -> None:
+        data = dict(data)
+        data["schema_version"] = SCHEMA_VERSION
+        atomic_write_json(self.paths.catalog_json, data)
         self.save_manifest(data)
 
     def load_index(self) -> Dict[str, Any]:
+        data = read_json(self.paths.index_json, {})
+        if isinstance(data, dict) and data:
+            data = self._migrate_meta(data)
+            return self._apply_meta_log(data)
         return self.load_meta()
 
     def save_index(self, data: Dict[str, Any]) -> None:
+        data = dict(data)
+        data["schema_version"] = SCHEMA_VERSION
+        atomic_write_json(self.paths.index_json, data)
         self.save_meta(data)
 
     # ---------------- App State ----------------
@@ -107,13 +138,16 @@ class ProjectStore:
             "whitelist_dirs": [],
             "recent_queries": [],
         }
-        data = read_json(self.paths.app_state_json, default)
-        return self._migrate_app_state(data)
+        data = read_json(self.paths.app_state_json, {})
+        if not isinstance(data, dict) or not data:
+            data = read_json(self.paths.project_json, default)
+        return self._migrate_app_state(data or default)
 
     def save_app_state(self, data: Dict[str, Any]) -> None:
         data = dict(data)
         data["schema_version"] = SCHEMA_VERSION
         atomic_write_json(self.paths.app_state_json, data)
+        atomic_write_json(self.paths.project_json, data)
 
     def _migrate_app_state(self, data: Any) -> Dict[str, Any]:
         if not isinstance(data, dict):
@@ -156,13 +190,16 @@ class ProjectStore:
             "files": [],
             "stats": {},
         }
-        data = read_json(self.paths.manifest_json, default)
-        return self._migrate_manifest(data)
+        data = read_json(self.paths.manifest_json, {})
+        if not isinstance(data, dict) or not data:
+            data = read_json(self.paths.catalog_json, default)
+        return self._migrate_manifest(data or default)
 
     def save_manifest(self, data: Dict[str, Any]) -> None:
         data = dict(data)
         data["schema_version"] = SCHEMA_VERSION
         atomic_write_json(self.paths.manifest_json, data)
+        atomic_write_json(self.paths.catalog_json, data)
 
     def _migrate_manifest(self, data: Any) -> Dict[str, Any]:
         if not isinstance(data, dict):
@@ -181,14 +218,17 @@ class ProjectStore:
             "files": {},
             "slides": {},
         }
-        data = read_json(self.paths.meta_json, default)
-        data = self._migrate_meta(data)
+        data = read_json(self.paths.meta_json, {})
+        if not isinstance(data, dict) or not data:
+            data = read_json(self.paths.index_json, default)
+        data = self._migrate_meta(data or default)
         return self._apply_meta_log(data)
 
     def save_meta(self, data: Dict[str, Any]) -> None:
         data = dict(data)
         data["schema_version"] = SCHEMA_VERSION
         atomic_write_json(self.paths.meta_json, data)
+        atomic_write_json(self.paths.index_json, data)
         if self.paths.meta_log.exists():
             try:
                 self.paths.meta_log.unlink()
