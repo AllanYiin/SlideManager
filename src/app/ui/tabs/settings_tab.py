@@ -15,11 +15,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTextEdit,
+    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.logging import get_logger
+from app.ui.async_worker import Worker
 
 log = get_logger(__name__)
 
@@ -29,6 +31,7 @@ class SettingsTab(QWidget):
         super().__init__()
         self.main_window = main_window
         self.ctx = None
+        self._test_inflight = False
 
         root = QVBoxLayout(self)
 
@@ -52,6 +55,16 @@ class SettingsTab(QWidget):
         row2.addWidget(self.btn_refresh)
         row2.addStretch(1)
         gl.addLayout(row2)
+
+        prog_row = QHBoxLayout()
+        self.test_prog = QProgressBar()
+        self.test_prog.setRange(0, 100)
+        self.test_prog.setValue(0)
+        self.test_prog.setVisible(False)
+        self.test_label = QLabel("")
+        prog_row.addWidget(self.test_prog)
+        prog_row.addWidget(self.test_label)
+        gl.addLayout(prog_row)
 
         root.addWidget(gb_key)
 
@@ -93,6 +106,7 @@ class SettingsTab(QWidget):
             key = self.main_window.secrets.get_openai_api_key() or ""
             self.api_key_edit.setText(key)
         except Exception:
+            log.exception("讀取 API Key 失敗")
             self.api_key_edit.setText("")
 
     def save_key(self) -> None:
@@ -102,6 +116,7 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "已儲存", "已儲存 API Key（本機加密保存）")
             self.refresh_services()
         except Exception as e:
+            log.exception("儲存 API Key 失敗：%s", e)
             QMessageBox.critical(self, "儲存失敗", f"{e}")
 
     def refresh_services(self) -> None:
@@ -115,54 +130,108 @@ class SettingsTab(QWidget):
         if not key:
             QMessageBox.information(self, "缺少 API Key", "請先輸入並儲存 API Key")
             return
-        try:
-            from app.services.openai_client import OpenAIClient
+        if self._test_inflight:
+            return
+        self._set_test_busy(True)
 
-            c = OpenAIClient(key)
-            vecs = c.embed_texts(["test"], model="text-embedding-3-small")
-            if vecs and len(vecs[0]) > 0:
-                QMessageBox.information(self, "測試成功", f"已取得向量維度：{len(vecs[0])}")
-            else:
-                QMessageBox.warning(self, "測試失敗", "未取得向量，請檢查 Key/網路")
-        except Exception as e:
-            QMessageBox.critical(self, "測試失敗", f"{e}")
+        def task():
+            import traceback
+
+            try:
+                from app.services.openai_client import OpenAIClient
+
+                c = OpenAIClient(key)
+                vecs = c.embed_texts(["test"], model="text-embedding-3-small")
+                if vecs and len(vecs[0]) > 0:
+                    return {"ok": True, "dim": len(vecs[0])}
+                return {"ok": False, "message": "未取得向量，請檢查 Key/網路"}
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"測試失敗：{exc}",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_test_done)
+        w.signals.error.connect(self._on_test_error)
+        self.main_window.thread_pool.start(w)
+
+    def _set_test_busy(self, busy: bool, message: str = "測試中...") -> None:
+        self._test_inflight = busy
+        self.btn_test.setEnabled(not busy)
+        self.btn_refresh.setEnabled(not busy)
+        if busy:
+            self.test_prog.setVisible(True)
+            self.test_prog.setRange(0, 0)
+            self.test_label.setText(message)
+        else:
+            self.test_prog.setRange(0, 100)
+            self.test_prog.setValue(0)
+            self.test_prog.setVisible(False)
+            self.test_label.setText("")
+
+    def _on_test_done(self, payload: object) -> None:
+        self._set_test_busy(False)
+        if not isinstance(payload, dict):
+            log.error("測試連線回傳格式不正確：%s", payload)
+            QMessageBox.critical(self, "測試失敗", "測試失敗，請稍後再試")
+            return
+        if payload.get("ok"):
+            dim = payload.get("dim", 0)
+            QMessageBox.information(self, "測試成功", f"已取得向量維度：{dim}")
+            return
+        tb = payload.get("traceback", "")
+        if tb:
+            log.error("測試連線失敗\n%s", tb)
+        msg = payload.get("message") or "測試失敗，請稍後再試"
+        QMessageBox.critical(self, "測試失敗", msg)
+
+    def _on_test_error(self, tb: str) -> None:
+        self._set_test_busy(False)
+        log.error("測試連線任務錯誤\n%s", tb)
+        QMessageBox.critical(self, "測試失敗", "測試失敗，請查看 logs/app.log")
 
     def refresh_diagnostics(self) -> None:
         if not self.ctx:
             self.diag.setText("尚未開啟專案")
             return
-        manifest = self.ctx.store.load_manifest()
-        meta = self.ctx.store.load_meta()
-        emb = manifest.get("embedding", {})
+        try:
+            manifest = self.ctx.store.load_manifest()
+            meta = self.ctx.store.load_meta()
+            emb = manifest.get("embedding", {})
 
-        lines = []
-        lines.append(f"專案路徑：{self.ctx.project_root}")
-        lines.append(f"白名單目錄數：{len(self.ctx.catalog.get_whitelist_dirs())}")
-        slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
-        lines.append(f"已索引投影片：{len(slides)}")
-        lines.append("")
-        lines.append("[Embedding]")
-        lines.append(f"text_model：{emb.get('text_model')}")
-        lines.append(f"text_dim：{emb.get('text_dim')}")
-        lines.append(f"image_dim：{emb.get('image_dim')}")
-        lines.append(f"text_source：{emb.get('text_source')}")
-        lines.append(f"image_source：{emb.get('image_source')}")
-        lines.append("")
-        lines.append("[Renderer]")
-        render_status = self.ctx.indexer.renderer.status()
-        lines.append(f"Renderer 可用：{'是' if render_status.get('available') else '否'}")
-        lines.append(f"Renderer 使用中：{render_status.get('active')}")
-        status_map = render_status.get('status') or {}
-        lines.append(f"LibreOffice：{status_map.get('libreoffice')}")
-        lines.append(f"Windows COM：{status_map.get('windows_com')}")
-        model_status = self.ctx.indexer.image_embedder.status()
-        lines.append(f"ONNX 啟用：{'是' if self.ctx.indexer.image_embedder.enabled_onnx() else '否（未啟用）'}")
-        lines.append(f"圖片模型版本：{model_status.version}")
-        lines.append(f"圖片模型狀態：{model_status.detail}")
-        lines.append("")
-        lines.append("提示：若未設定 API Key，向量搜尋會停用，僅提供 BM25 文字搜尋。")
+            lines = []
+            lines.append(f"專案路徑：{self.ctx.project_root}")
+            lines.append(f"白名單目錄數：{len(self.ctx.catalog.get_whitelist_dirs())}")
+            slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+            lines.append(f"已索引投影片：{len(slides)}")
+            lines.append("")
+            lines.append("[Embedding]")
+            lines.append(f"text_model：{emb.get('text_model')}")
+            lines.append(f"text_dim：{emb.get('text_dim')}")
+            lines.append(f"image_dim：{emb.get('image_dim')}")
+            lines.append(f"text_source：{emb.get('text_source')}")
+            lines.append(f"image_source：{emb.get('image_source')}")
+            lines.append("")
+            lines.append("[Renderer]")
+            render_status = self.ctx.indexer.renderer.status()
+            lines.append(f"Renderer 可用：{'是' if render_status.get('available') else '否'}")
+            lines.append(f"Renderer 使用中：{render_status.get('active')}")
+            status_map = render_status.get("status") or {}
+            lines.append(f"LibreOffice：{status_map.get('libreoffice')}")
+            lines.append(f"Windows COM：{status_map.get('windows_com')}")
+            model_status = self.ctx.indexer.image_embedder.status()
+            lines.append(f"ONNX 啟用：{'是' if self.ctx.indexer.image_embedder.enabled_onnx() else '否（未啟用）'}")
+            lines.append(f"圖片模型版本：{model_status.version}")
+            lines.append(f"圖片模型狀態：{model_status.detail}")
+            lines.append("")
+            lines.append("提示：若未設定 API Key，向量搜尋會停用，僅提供 BM25 文字搜尋。")
 
-        self.diag.setText("\n".join(lines))
+            self.diag.setText("\n".join(lines))
+        except Exception as exc:
+            log.exception("讀取診斷資訊失敗：%s", exc)
+            self.diag.setText("讀取診斷資訊失敗，請查看 logs/app.log")
 
     def refresh_whitelist(self) -> None:
         if not self.ctx:
@@ -191,4 +260,5 @@ class SettingsTab(QWidget):
 
                 subprocess.Popen(["xdg-open", str(p)])
         except Exception as e:
+            log.exception("開啟 logs 資料夾失敗：%s", e)
             QMessageBox.critical(self, "開啟失敗", f"{e}")
