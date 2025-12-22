@@ -292,7 +292,7 @@ class LibraryTab(QWidget):
             self.prog_label.setText(f"掃描中... 已掃描 {self._scan_count} 筆")
             self._refresh_table_with_files(self._scan_files_cache)
         except Exception:
-            pass
+            log.exception("更新掃描進度失敗")
 
     def _on_scan_done(self, _result: object) -> None:
         self.prog.setRange(0, 100)
@@ -628,6 +628,7 @@ class LibraryTab(QWidget):
         try:
             render_status = self.ctx.indexer.renderer.status()
         except Exception:
+            log.exception("取得 renderer 狀態失敗")
             render_status = None
         if render_status and not render_status.get("available", False):
             status_map = render_status.get("status") or {}
@@ -726,7 +727,7 @@ class LibraryTab(QWidget):
             if stage in {"file_done", "skip", "extracted"}:
                 self._schedule_index_refresh()
         except Exception:
-            pass
+            log.exception("更新索引進度失敗")
 
     def cancel_indexing(self) -> None:
         self._cancel_index = True
@@ -760,6 +761,7 @@ class LibraryTab(QWidget):
             else:
                 self.prog_label.setText(msg)
         except Exception:
+            log.exception("更新索引完成訊息失敗")
             self.prog_label.setText("索引完成")
 
     def _on_error(self, tb: str) -> None:
@@ -808,6 +810,26 @@ class LibraryTab(QWidget):
     def clear_missing_files(self) -> None:
         if not self.ctx:
             return
-        removed = self.ctx.catalog.clear_missing_files()
+        self._set_last_action("清理缺失項目", self.clear_missing_files)
+        self.prog_label.setText("清理中...")
+        self.prog.setRange(0, 0)
+
+        def task():
+            return self.ctx.catalog.clear_missing_files()
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_clear_missing_done)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_clear_missing_done(self, removed: object) -> None:
+        self.prog.setRange(0, 100)
+        self.prog.setValue(0)
+        self.prog_label.setText("清理完成")
         self.refresh_table()
-        QMessageBox.information(self, "清理完成", f"已清理 {removed} 筆缺失項目")
+        try:
+            removed_count = int(removed)
+        except Exception:
+            log.exception("解析清理結果失敗")
+            removed_count = 0
+        QMessageBox.information(self, "清理完成", f"已清理 {removed_count} 筆缺失項目")

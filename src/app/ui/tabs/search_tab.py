@@ -23,11 +23,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QTextEdit,
+    QProgressBar,
 )
 from PySide6.QtWidgets import QAbstractItemView
 from app.core.errors import ErrorCode, format_user_message
 from app.core.logging import get_logger
 from app.services.search_service import SearchQuery
+from app.ui.async_worker import Worker
 
 log = get_logger(__name__)
 
@@ -39,6 +41,7 @@ class SearchTab(QWidget):
         self.ctx = None
         self._image_path: Optional[Path] = None
         self._last_results = []
+        self._search_inflight = False
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -90,6 +93,16 @@ class SearchTab(QWidget):
         self.results.horizontalHeader().setStretchLastSection(True)
         ll.addWidget(self.results)
 
+        prog_row = QHBoxLayout()
+        self.search_prog = QProgressBar()
+        self.search_prog.setRange(0, 100)
+        self.search_prog.setValue(0)
+        self.search_prog.setVisible(False)
+        self.search_label = QLabel("")
+        prog_row.addWidget(self.search_prog)
+        prog_row.addWidget(self.search_label)
+        ll.addLayout(prog_row)
+
         # Right: preview
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -129,6 +142,21 @@ class SearchTab(QWidget):
         self.preview_img.setText("預覽")
         self.preview_text.setText("")
         self.btn_open_file.setEnabled(False)
+        self._set_search_busy(False)
+
+    def _set_search_busy(self, busy: bool, message: str = "搜尋中...") -> None:
+        self._search_inflight = busy
+        self.btn_search.setEnabled(not busy)
+        self.btn_pick_image.setEnabled(not busy)
+        if busy:
+            self.search_prog.setVisible(True)
+            self.search_prog.setRange(0, 0)
+            self.search_label.setText(message)
+        else:
+            self.search_prog.setRange(0, 100)
+            self.search_prog.setValue(0)
+            self.search_prog.setVisible(False)
+            self.search_label.setText("")
 
     def pick_image(self) -> None:
         fp, _ = QFileDialog.getOpenFileName(self, "選擇圖片", "", "Images (*.png *.jpg *.jpeg *.webp)")
@@ -140,6 +168,8 @@ class SearchTab(QWidget):
     def do_search(self) -> None:
         if not self.ctx:
             QMessageBox.information(self, "尚未開啟專案", "請先開啟或建立專案資料夾")
+            return
+        if self._search_inflight:
             return
         meta = self.ctx.store.load_meta()
         slides = meta.get("slides", {}) if isinstance(meta, dict) else {}
@@ -172,7 +202,7 @@ class SearchTab(QWidget):
             top_k=50,
         )
 
-        image_vec = None
+        image_path = self._image_path
         if m == "image":
             if not self.ctx.indexer.image_embedder.enabled_onnx():
                 msg = format_user_message(ErrorCode.ONNX_ERROR, detail="圖片模型不可用，無法進行以圖搜圖")
@@ -180,40 +210,79 @@ class SearchTab(QWidget):
                     self.main_window.show_toast(msg, level="error", timeout_ms=12000)
                 QMessageBox.information(self, "圖片模型不可用", msg)
                 return
-            if not self._image_path or not self._image_path.exists():
+            if not image_path or not image_path.exists():
                 QMessageBox.information(self, "未選擇圖片", "請先選擇一張圖片")
                 return
-            try:
-                b = self._image_path.read_bytes()
-                image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
-                    b, dim=self.ctx.indexer.emb_cfg.image_dim
-                )
-            except Exception as e:
-                msg = f"讀取圖片失敗：{e}"
-                if hasattr(self.main_window, "show_toast"):
-                    self.main_window.show_toast(msg, level="error", timeout_ms=12000)
-                QMessageBox.critical(self, "讀取圖片失敗", msg)
-                return
-        elif self._image_path and self._image_path.exists():
-            try:
-                b = self._image_path.read_bytes()
-                image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
-                    b, dim=self.ctx.indexer.emb_cfg.image_dim
-                )
-            except Exception:
-                image_vec = None
 
-        try:
-            results = self.ctx.search.search(q, image_vec=image_vec)
-        except Exception as exc:
-            log.exception("搜尋失敗：%s", exc)
-            msg = f"搜尋失敗，請稍後再試（{exc}）"
+        self._set_search_busy(True)
+
+        def task():
+            import traceback
+
+            image_vec = None
+            if m == "image":
+                try:
+                    b = image_path.read_bytes() if image_path else b""
+                    image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
+                        b, dim=self.ctx.indexer.emb_cfg.image_dim
+                    )
+                except Exception as exc:
+                    return {
+                        "ok": False,
+                        "message": f"讀取圖片失敗：{exc}",
+                        "traceback": traceback.format_exc(),
+                    }
+            elif image_path and image_path.exists():
+                try:
+                    b = image_path.read_bytes()
+                    image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
+                        b, dim=self.ctx.indexer.emb_cfg.image_dim
+                    )
+                except Exception as exc:
+                    log.warning("讀取圖片向量失敗，已略過：%s", exc)
+
+            try:
+                results = self.ctx.search.search(q, image_vec=image_vec)
+                return {"ok": True, "results": results}
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"搜尋失敗，請稍後再試（{exc}）",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_search_done)
+        w.signals.error.connect(self._on_search_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_search_done(self, payload: object) -> None:
+        self._set_search_busy(False)
+        if not isinstance(payload, dict):
+            log.error("搜尋回傳格式不正確：%s", payload)
+            msg = "搜尋失敗，請稍後再試"
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast(msg, level="error", timeout_ms=12000)
             QMessageBox.critical(self, "搜尋失敗", msg)
             return
-        self._last_results = results
+        if not payload.get("ok"):
+            tb = payload.get("traceback", "")
+            log.error("搜尋失敗\n%s", tb)
+            msg = payload.get("message") or "搜尋失敗，請稍後再試"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+            QMessageBox.critical(self, "搜尋失敗", msg)
+            return
+        self._last_results = payload.get("results", [])
         self.render_results()
+
+    def _on_search_error(self, tb: str) -> None:
+        self._set_search_busy(False)
+        log.error("搜尋任務錯誤\n%s", tb)
+        msg = "搜尋發生錯誤，請查看 logs/app.log"
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+        QMessageBox.critical(self, "搜尋失敗", msg)
 
     def render_results(self) -> None:
         self.results.setRowCount(len(self._last_results))
@@ -281,6 +350,7 @@ class SearchTab(QWidget):
 
                 subprocess.Popen(["xdg-open", str(pp.parent)])
         except Exception as e:
+            log.exception("開啟檔案位置失敗：%s", e)
             msg = f"開啟檔案位置失敗：{e}"
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast(msg, level="error", timeout_ms=12000)

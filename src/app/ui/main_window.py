@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
                 raw = base64.b64decode(self.settings.window_geometry_b64.encode("ascii"))
                 self.restoreGeometry(raw)
             except Exception:
-                pass
+                log.exception("還原視窗狀態失敗")
         self.tabs.setCurrentIndex(int(self.settings.last_tab_index or 0))
 
     def closeEvent(self, event):
@@ -134,7 +134,7 @@ class MainWindow(QMainWindow):
                 self.settings.last_project_dir = str(self.ctx.project_root)
             save_settings(self.settings)
         except Exception:
-            pass
+            log.exception("儲存視窗狀態失敗")
         super().closeEvent(event)
 
     def _on_tab_changed(self, idx: int) -> None:
@@ -186,6 +186,7 @@ class MainWindow(QMainWindow):
             save_settings(self.settings)
             self._ensure_image_model(project_root, store.paths.cache_dir)
         except Exception as e:
+            log.exception("開啟專案失敗：%s", e)
             QMessageBox.critical(self, "開啟專案失敗", f"發生錯誤：{e}")
 
     def action_scan(self) -> None:
@@ -238,7 +239,7 @@ class MainWindow(QMainWindow):
                 self.model_download_prog.setRange(0, 0)
             self.model_download_prog.setVisible(True)
         except Exception:
-            pass
+            log.exception("更新圖片模型下載進度失敗")
 
     def _on_model_ready(self, model_path: object) -> None:
         if not self.ctx or self._model_download_project_root != self.ctx.project_root:
