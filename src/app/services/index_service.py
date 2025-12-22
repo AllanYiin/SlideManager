@@ -441,7 +441,7 @@ class IndexService:
 
         text_vectors_to_append: Dict[str, np.ndarray] = {}
         slide_tokens_by_id: Dict[str, List[str]] = {}
-        slide_text_vec_by_id: Dict[str, Optional[np.ndarray]] = {}
+        slide_text_vec_by_id: Dict[str, Optional[bool]] = {}
         bm25_indices: List[int] = []
         bm25_payload: List[str] = []
         embed_indices: List[int] = []
@@ -530,9 +530,9 @@ class IndexService:
                 vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
                 vec = np.asarray(text_vecs[idx], dtype=vec_dtype)
                 text_vectors_to_append[slide_id] = vec
-                slide_text_vec_by_id[slide_id] = vec
+                slide_text_vec_by_id[slide_id] = True
             else:
-                slide_text_vec_by_id[slide_id] = None
+                slide_text_vec_by_id[slide_id] = False
 
         if update_text and text_vectors_to_append:
             self.store.append_text_vectors(text_vectors_to_append)
@@ -676,10 +676,13 @@ class IndexService:
                     body = slide.slide_text.body or ""
                     tokens = slide_tokens_by_id.get(slide_id, [])
                     has_text = bool(all_text.strip())
+                    text_vec_cached = slide_text_vec_by_id.get(slide_id)
+                    if text_vec_cached is None:
+                        text_vec_cached = bool(flags.get("has_text_vec"))
                     flags.update(
                         {
                             "has_text": has_text,
-                            "has_text_vec": bool(slide_text_vec_by_id.get(slide_id)),
+                            "has_text_vec": bool(text_vec_cached),
                             "has_bm25": True,
                         }
                     )
