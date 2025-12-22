@@ -9,18 +9,17 @@ def classify_doc_status(
     entry: Dict[str, Any],
     *,
     slides: List[Dict[str, Any]],
-    meta_file: Dict[str, Any] | None,
+    meta_file: Dict[str, Any] | None = None,
 ) -> str:
     if entry.get("missing"):
         return "missing"
     if entry.get("last_error"):
         return "error"
-    if not meta_file:
+    indexed_at = int(entry.get("indexed_at") or 0)
+    if indexed_at <= 0:
         return "pending"
     mtime = int(entry.get("modified_time") or 0)
-    last_text = int(meta_file.get("last_text_extract_at") or 0)
-    last_image = int(meta_file.get("last_image_index_at") or 0)
-    if mtime > last_text or mtime > last_image:
+    if mtime > indexed_at:
         return "stale"
 
     slide_count = entry.get("slide_count")

@@ -128,9 +128,7 @@ class PageStatusTab(QWidget):
             return
         try:
             catalog = self.ctx.store.load_manifest()
-            meta = self.ctx.store.load_meta()
             files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
-            slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
         except Exception as exc:
             log.error("讀取頁面狀態失敗：%s", exc)
             if hasattr(self.main_window, "show_toast"):
@@ -141,19 +139,32 @@ class PageStatusTab(QWidget):
             return
 
         file_map = {f.get("file_id"): f for f in files if f.get("file_id")}
+        slide_pages = self.ctx.store.load_slide_pages()
+        text_vectors = self.ctx.store.load_text_vectors()
+        image_vectors = self.ctx.store.load_image_vectors()
         slides_by_file: Dict[str, Dict[int, Dict[str, Any]]] = {}
-        for slide in slides_map.values():
-            if not isinstance(slide, dict):
+        for slide_id, text in slide_pages.items():
+            if not isinstance(slide_id, str) or "#" not in slide_id:
                 continue
-            file_id = slide.get("file_id")
-            slide_no = slide.get("slide_no")
-            if not file_id or not slide_no:
-                continue
+            file_id, page_raw = slide_id.split("#", 1)
             try:
-                slide_no_int = int(slide_no)
+                slide_no = int(page_raw)
             except Exception:
                 continue
-            slides_by_file.setdefault(file_id, {})[slide_no_int] = slide
+            text_value = "" if text is None else str(text)
+            thumb_path = self.ctx.store.paths.thumbs_dir / file_id / f"{slide_no}.png"
+            flags = {
+                "has_text": bool(text_value.strip()),
+                "has_bm25": bool(text_value.strip()),
+                "has_text_vec": slide_id in text_vectors,
+                "has_image": thumb_path.exists(),
+                "has_image_vec": slide_id in image_vectors,
+            }
+            slides_by_file.setdefault(file_id, {})[slide_no] = {
+                "file_id": file_id,
+                "slide_no": slide_no,
+                "flags": flags,
+            }
 
         rows: List[Dict[str, Any]] = []
         for file_entry in files:
@@ -173,10 +184,9 @@ class PageStatusTab(QWidget):
             rows.extend(file_rows)
 
         if not rows:
-            for slide in slides_map.values():
-                if not isinstance(slide, dict):
-                    continue
-                rows.append(self._build_row_from_slide(slide, file_map.get(slide.get("file_id"))))
+            for slide_map in slides_by_file.values():
+                for slide in slide_map.values():
+                    rows.append(self._build_row_from_slide(slide, file_map.get(slide.get("file_id"))))
 
         self._cached_rows = rows
         metrics = self._compute_metrics(files, rows)

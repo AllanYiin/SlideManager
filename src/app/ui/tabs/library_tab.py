@@ -341,36 +341,46 @@ class LibraryTab(QWidget):
             self.table.setRowCount(0)
             return
         cat = self.ctx.store.load_manifest()
-        meta = self.ctx.store.load_meta()
-        self._meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-        slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+        slide_pages = self.ctx.store.load_slide_pages()
+        text_vectors = self.ctx.store.load_text_vectors()
+        image_vectors = self.ctx.store.load_image_vectors()
         slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
-        for slide in slides_map.values():
-            if not isinstance(slide, dict):
+        for slide_id, text in slide_pages.items():
+            if not isinstance(slide_id, str):
                 continue
-            file_id = slide.get("file_id")
-            if not file_id:
+            if "#" not in slide_id:
                 continue
-            slides_by_file_id.setdefault(file_id, []).append(slide)
+            file_id, page_raw = slide_id.split("#", 1)
+            try:
+                page_no = int(page_raw)
+            except Exception:
+                continue
+            thumb_path = self.ctx.store.paths.thumbs_dir / file_id / f"{page_no}.png"
+            has_image = thumb_path.exists()
+            text_value = "" if text is None else str(text)
+            flags = {
+                "has_text": bool(text_value.strip()),
+                "has_bm25": bool(text_value.strip()),
+                "has_text_vec": slide_id in text_vectors,
+                "has_image": has_image,
+                "has_image_vec": slide_id in image_vectors,
+            }
+            slide_entry = {
+                "slide_id": slide_id,
+                "file_id": file_id,
+                "slide_no": page_no,
+                "thumbnail_path": str(thumb_path) if has_image else None,
+                "flags": flags,
+            }
+            slides_by_file_id.setdefault(file_id, []).append(slide_entry)
+        self._meta_files = {}
         self._slides_by_file_id = slides_by_file_id
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
         self._refresh_table_with_files(files)
 
     def _refresh_table_with_files(self, files: List[Dict[str, Any]]) -> None:
-        if not hasattr(self, "_meta_files") or not hasattr(self, "_slides_by_file_id"):
-            if self.ctx:
-                meta = self.ctx.store.load_meta()
-                self._meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-                slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
-                slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
-                for slide in slides_map.values():
-                    if not isinstance(slide, dict):
-                        continue
-                    file_id = slide.get("file_id")
-                    if not file_id:
-                        continue
-                    slides_by_file_id.setdefault(file_id, []).append(slide)
-                self._slides_by_file_id = slides_by_file_id
+        if not hasattr(self, "_slides_by_file_id"):
+            self._slides_by_file_id = {}
         kw = (self.filter_edit.text() or "").strip().lower()
         if kw:
             files = [f for f in files if kw in (f.get("filename", "").lower())]
@@ -382,7 +392,6 @@ class LibraryTab(QWidget):
                 if classify_doc_status(
                     f,
                     slides=self._slides_by_file_id.get(f.get("file_id"), []),
-                    meta_file=self._meta_files.get(f.get("file_id")),
                 )
                 == status_filter
             ]
@@ -450,8 +459,7 @@ class LibraryTab(QWidget):
     def _status_text(self, f: Dict[str, Any]) -> str:
         file_id = f.get("file_id")
         slides = self._slides_by_file_id.get(file_id, []) if hasattr(self, "_slides_by_file_id") else []
-        meta_file = self._meta_files.get(file_id) if hasattr(self, "_meta_files") else None
-        status = classify_doc_status(f, slides=slides, meta_file=meta_file)
+        status = classify_doc_status(f, slides=slides)
         return STATUS_LABELS.get(status, "未處理")
 
     def _match_coverage_filter(self, f: Dict[str, Any], coverage: str) -> bool:
@@ -652,28 +660,16 @@ class LibraryTab(QWidget):
         store = self.ctx.store
         paths = store.paths
         manifest = store.load_manifest()
-        meta = store.load_meta()
-        meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-        meta_slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+        slide_pages = store.load_slide_pages()
 
         total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
         scope_files = len(files)
         indexed_files = sum(1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed"))
 
-        missing_text_ts = 0
-        missing_image_ts = 0
-        for entry in meta_files.values():
-            if not isinstance(entry, dict):
-                continue
-            if not entry.get("last_text_extract_at"):
-                missing_text_ts += 1
-            if not entry.get("last_image_index_at"):
-                missing_image_ts += 1
-
         thumbs_count = 0
         try:
             if paths.thumbs_dir.exists():
-                thumbs_count = sum(1 for _ in paths.thumbs_dir.iterdir() if _.is_file())
+                thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
         except Exception as exc:
             log.warning("讀取縮圖快取數量失敗：%s", exc)
 
@@ -700,21 +696,21 @@ class LibraryTab(QWidget):
         legacy_candidates = [
             ("project.json", paths.project_json, paths.app_state_json),
             ("catalog.json", paths.catalog_json, paths.manifest_json),
-            ("index.json", paths.index_json, paths.meta_json),
+            ("index.json", paths.index_json, paths.slide_pages_json),
         ]
         for legacy_name, legacy_path, new_path in legacy_candidates:
             if legacy_path.exists() and not new_path.exists():
                 legacy_needed = True
                 legacy_lines.append(f"- {legacy_name} 存在，但 {new_path.name} 缺失")
 
-        fill_needed = missing_text_ts > 0 or missing_image_ts > 0
+        fill_needed = False
 
         details = (
             f"本次範圍：{scope_files} 個檔案\n"
             f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
-            f"索引檔案（meta.json）：{len(meta_files)} | 投影片索引：{len(meta_slides)}\n"
+            f"投影片文字（slide_pages.json）：{len(slide_pages)}\n"
             f"縮圖快取：{thumbs_count} 張\n"
-            f"缺少更新時間：文字 {missing_text_ts} | 圖像 {missing_image_ts}"
+            "索引時間：以 manifest.json 的 indexed_at 為準"
         )
 
         detail_long_lines = [
@@ -723,12 +719,11 @@ class LibraryTab(QWidget):
             f"- project.json：{file_info(paths.project_json)}",
             f"- manifest.json：{file_info(paths.manifest_json)}",
             f"- catalog.json：{file_info(paths.catalog_json)}",
-            f"- meta.json：{file_info(paths.meta_json)}",
+            f"- slide_pages.json：{file_info(paths.slide_pages_json)}",
             f"- index.json：{file_info(paths.index_json)}",
             "",
             "=== 索引時間概況 ===",
-            f"- 文字索引更新時間缺漏：{missing_text_ts} 個檔案",
-            f"- 圖像索引更新時間缺漏：{missing_image_ts} 個檔案",
+            "- 目前僅追蹤 manifest.json 的 indexed_at",
         ]
         if legacy_lines:
             detail_long_lines.append("")
@@ -746,8 +741,15 @@ class LibraryTab(QWidget):
             store.save_app_state(app_state)
             manifest = store.load_manifest()
             store.save_manifest(manifest)
-            meta = store.load_meta()
-            store.save_meta(meta)
+            legacy_index = store.load_index()
+            legacy_slides = legacy_index.get("slides", {}) if isinstance(legacy_index.get("slides"), dict) else {}
+            slide_pages: Dict[str, str] = {}
+            for slide_id, slide in legacy_slides.items():
+                if not isinstance(slide_id, str) or not isinstance(slide, dict):
+                    continue
+                slide_pages[slide_id] = str(slide.get("text_for_bm25") or "")
+            if slide_pages:
+                store.save_slide_pages(slide_pages)
             QMessageBox.information(self, "轉換完成", "已完成舊版資料轉換並寫入新版檔案。")
         except Exception:
             log.exception("轉換舊版資料失敗")
@@ -758,35 +760,26 @@ class LibraryTab(QWidget):
             return
         store = self.ctx.store
         try:
-            meta = store.load_meta()
-            meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-            if store.paths.meta_json.exists():
-                source_ts = int(store.paths.meta_json.stat().st_mtime)
+            manifest = store.load_manifest()
+            files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
+            if store.paths.slide_pages_json.exists():
+                source_ts = int(store.paths.slide_pages_json.stat().st_mtime)
             elif store.paths.index_json.exists():
                 source_ts = int(store.paths.index_json.stat().st_mtime)
             else:
                 source_ts = int(datetime.datetime.now().timestamp())
             updated = 0
-            for key, entry in meta_files.items():
-                if not isinstance(entry, dict):
-                    continue
-                changed = False
-                if not entry.get("last_text_extract_at"):
-                    entry["last_text_extract_at"] = source_ts
-                    changed = True
-                if not entry.get("last_image_index_at"):
-                    entry["last_image_index_at"] = source_ts
-                    changed = True
-                if changed:
-                    meta_files[key] = entry
+            for entry in files:
+                if not entry.get("indexed_at"):
+                    entry["indexed_at"] = source_ts
                     updated += 1
             if updated:
-                meta["files"] = meta_files
-                store.save_meta(meta)
+                manifest["files"] = files
+                store.save_manifest(manifest)
             QMessageBox.information(
                 self,
                 "補齊完成",
-                f"已補齊 {updated} 筆索引更新時間（來源：索引檔存檔日）。",
+                f"已補齊 {updated} 筆索引更新時間（來源：slide_pages.json 或 index.json 存檔日）。",
             )
         except Exception:
             log.exception("補齊索引更新時間失敗")
