@@ -77,7 +77,7 @@ class EmbeddingService:
                     v = self._align_dim(np.asarray(vecs[idx], dtype=np.float32))
                     out[pos] = normalize_l2(v)
 
-                    self._cache[self._cache_key(t)] = np.asarray(v, dtype=np.float32).tolist()
+                    self._cache[self._cache_key(t)] = self._to_cache_list(v)
                 else:
                     out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
             self._save_cache()
@@ -139,6 +139,7 @@ class EmbeddingService:
         return v
 
     def _to_cache_list(self, v: np.ndarray) -> List[float]:
-        if hasattr(v, "tolist"):
-            return list(v.tolist())
-        return list(v)
+        arr = np.asarray(v, dtype=np.float32).reshape(-1)
+        if hasattr(arr, "tolist"):
+            return list(arr.tolist())
+        return list(arr)
