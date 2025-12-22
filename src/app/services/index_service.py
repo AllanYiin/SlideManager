@@ -230,45 +230,6 @@ class IndexService:
                     out[slide_no] = slide_val
             return out
 
-        def can_reuse_text(
-            meta_entry: Dict[str, Any],
-            slide_count: int,
-            slides_by_no: Dict[int, Dict[str, Any]],
-            start_mtime: int,
-        ) -> bool:
-            if slide_count <= 0:
-                return bool(int(meta_entry.get("last_text_extract_at") or 0) >= start_mtime)
-            if int(meta_entry.get("last_text_extract_at") or 0) < start_mtime:
-                return False
-            for slide_no in range(1, slide_count + 1):
-                entry = slides_by_no.get(slide_no)
-                if not isinstance(entry, dict):
-                    return False
-                if "text_for_bm25" not in entry:
-                    return False
-            return True
-
-        def can_reuse_image(
-            meta_entry: Dict[str, Any],
-            slide_count: int,
-            slides_by_no: Dict[int, Dict[str, Any]],
-            start_mtime: int,
-        ) -> bool:
-            if slide_count <= 0:
-                return bool(int(meta_entry.get("last_image_index_at") or 0) >= start_mtime)
-            if int(meta_entry.get("last_image_index_at") or 0) < start_mtime:
-                return False
-            for slide_no in range(1, slide_count + 1):
-                entry = slides_by_no.get(slide_no)
-                if not isinstance(entry, dict):
-                    return False
-                thumb_path = entry.get("thumbnail_path")
-                if not thumb_path:
-                    return False
-                if not Path(str(thumb_path)).exists():
-                    return False
-            return True
-
         total_files = len(files)
         stage2_units = 0
         if update_text:
@@ -331,36 +292,77 @@ class IndexService:
                 slide_count = meta_slide_count
             slides_by_no = slide_meta_by_no(file_id)
 
+            cached_texts_by_no: Dict[int, SlideText] = {}
+            cached_text_valid = int(meta_entry.get("last_text_extract_at") or 0) >= start_mtime
+            if update_text and cached_text_valid:
+                for slide_no, slide_entry in slides_by_no.items():
+                    if not isinstance(slide_entry, dict):
+                        continue
+                    if "text_for_bm25" not in slide_entry:
+                        continue
+                    cached_texts_by_no[slide_no] = SlideText(
+                        page=slide_no,
+                        title=str(slide_entry.get("title") or ""),
+                        body=str(slide_entry.get("body_text") or ""),
+                        all_text=str(slide_entry.get("text_for_bm25") or ""),
+                    )
+
+            cached_thumbs_by_no: Dict[int, str] = {}
+            cached_image_valid = int(meta_entry.get("last_image_index_at") or 0) >= start_mtime
+            if update_image and cached_image_valid:
+                for slide_no, slide_entry in slides_by_no.items():
+                    if not isinstance(slide_entry, dict):
+                        continue
+                    thumb_path = slide_entry.get("thumbnail_path")
+                    if not thumb_path:
+                        continue
+                    if not Path(str(thumb_path)).exists():
+                        continue
+                    cached_thumbs_by_no[slide_no] = str(thumb_path)
+
             reuse_text = False
+            slide_texts: List[SlideText] = []
+            extract_elapsed = 0.0
             if update_text:
-                reuse_text = can_reuse_text(meta_entry, slide_count, slides_by_no, start_mtime)
-
-            reuse_image = False
-            if update_image:
-                reuse_image = can_reuse_image(meta_entry, slide_count, slides_by_no, start_mtime)
-
-            if update_text:
-                if reuse_text:
+                missing_text = False
+                if slide_count > 0:
+                    missing_text = any(slide_no not in cached_texts_by_no for slide_no in range(1, slide_count + 1))
+                else:
+                    missing_text = not bool(cached_texts_by_no)
+                need_extract = not cached_text_valid or missing_text
+                if not need_extract:
+                    reuse_text = True
                     progress("extract_cache", fi, overall_total, f"使用快取文字：{pptx.name}")
-                    slide_texts = [
-                        SlideText(
-                            page=slide_no,
-                            title=str(slide_entry.get("title") or ""),
-                            body=str(slide_entry.get("body_text") or ""),
-                            all_text=str(slide_entry.get("text_for_bm25") or ""),
-                        )
-                        for slide_no, slide_entry in sorted(slides_by_no.items(), key=lambda x: x[0])
-                        if slide_no <= slide_count or slide_count <= 0
-                    ]
-                    extract_elapsed = 0.0
+                    slide_texts = [cached_texts_by_no[n] for n in sorted(cached_texts_by_no.keys())]
                 else:
                     progress("extract", fi, overall_total, f"抽取文字：{pptx.name}")
                     extract_start = time.perf_counter()
-                    slide_texts = self.extractor.extract(pptx)
+                    extracted = self.extractor.extract(pptx)
                     extract_elapsed = time.perf_counter() - extract_start
-            else:
-                slide_texts = []
-                extract_elapsed = 0.0
+                    extracted_by_no = {st.page: st for st in extracted}
+                    if slide_count <= 0:
+                        slide_count = max(slide_count, len(extracted_by_no), len(cached_texts_by_no))
+                    if slide_count > 0:
+                        slide_texts = []
+                        for slide_no in range(1, slide_count + 1):
+                            if slide_no in cached_texts_by_no:
+                                slide_texts.append(cached_texts_by_no[slide_no])
+                            elif slide_no in extracted_by_no:
+                                slide_texts.append(extracted_by_no[slide_no])
+                        if not slide_texts:
+                            slide_texts = extracted
+                    else:
+                        slide_texts = extracted or list(cached_texts_by_no.values())
+
+            reuse_image = False
+            if update_image and cached_image_valid:
+                missing_image = False
+                if slide_count > 0:
+                    missing_image = any(slide_no not in cached_thumbs_by_no for slide_no in range(1, slide_count + 1))
+                else:
+                    missing_image = not bool(cached_thumbs_by_no)
+                if not missing_image:
+                    reuse_image = True
 
             if cancel_flag and cancel_flag():
                 return 1, "已取消"
@@ -394,12 +396,11 @@ class IndexService:
                     )
                 )
 
-            if reuse_image and file_slides:
+            if update_image and file_slides:
                 for slide in file_slides:
-                    entry = slides_by_no.get(slide.page)
-                    if not isinstance(entry, dict):
-                        continue
-                    slide.thumb_path = str(entry.get("thumbnail_path") or "") or None
+                    thumb_path = cached_thumbs_by_no.get(slide.page)
+                    if thumb_path:
+                        slide.thumb_path = thumb_path
 
             staged_files.append(
                 FileStageData(
@@ -567,7 +568,8 @@ class IndexService:
                             render_pages += fd.slide_count
                         for slide in fd.slides:
                             thumb_path = str(thumbs[slide.page - 1]) if slide.page - 1 < len(thumbs) else None
-                            slide.thumb_path = thumb_path
+                            if thumb_path:
+                                slide.thumb_path = thumb_path
 
                     for slide in fd.slides:
                         if not slide.thumb_path:
