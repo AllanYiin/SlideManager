@@ -4,16 +4,19 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
-
-import requests
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from app.core.logging import get_logger
 
 log = get_logger(__name__)
+
+if TYPE_CHECKING:
+    import requests
 
 RERANK_MODEL_NAME = "rerankTexure.onnx"
 RERANK_MODEL_FILE_ID = "1Ha6eOT3L2bxd3fFCh_hRgDg3dku7iPmO"
@@ -63,11 +66,17 @@ def _download_from_google_drive(
     *,
     on_progress: Optional[Callable[[ModelDownloadProgress], None]] = None,
 ) -> Path:
+    requests_module = _get_requests_module()
     url = "https://drive.google.com/uc"
     params = {"id": file_id, "export": "download"}
-    session = requests.Session()
+    session = requests_module.Session()
 
-    response = _request_drive(session, url, params=params)
+    response = _request_drive(
+        session,
+        url,
+        params=params,
+        requests_module=requests_module,
+    )
 
     if response.status_code != 200:
         raise RuntimeError(f"Google Drive 回應碼 {response.status_code}")
@@ -78,14 +87,25 @@ def _download_from_google_drive(
 
     if token:
         params["confirm"] = token
-        response = _request_drive(session, url, params=params, error_message="Google Drive 確認下載請求失敗")
+        response = _request_drive(
+            session,
+            url,
+            params=params,
+            error_message="Google Drive 確認下載請求失敗",
+            requests_module=requests_module,
+        )
         if response.status_code != 200:
             raise RuntimeError(f"確認後下載仍失敗，回應碼 {response.status_code}")
 
     if _is_html_response(response):
         download_url = _extract_download_url_from_html(response.text)
         if download_url:
-            response = _request_drive(session, download_url, error_message="Google Drive 轉向下載失敗")
+            response = _request_drive(
+                session,
+                download_url,
+                error_message="Google Drive 轉向下載失敗",
+                requests_module=requests_module,
+            )
         if _is_html_response(response):
             raise RuntimeError(
                 "Google Drive 回傳警示頁面，請確認檔案分享權限，或手動下載後放到："
@@ -125,7 +145,7 @@ def _download_from_google_drive(
         raise
 
 
-def _get_confirm_token(response: requests.Response) -> Optional[str]:
+def _get_confirm_token(response: Any) -> Optional[str]:
     for key, value in response.cookies.items():
         if key.startswith("download_warning"):
             return value
@@ -150,21 +170,22 @@ def _extract_download_url_from_html(html: str) -> Optional[str]:
 
 
 def _request_drive(
-    session: requests.Session,
+    session: Any,
     url: str,
     *,
     params: Optional[dict] = None,
     error_message: str = "Google Drive 下載請求失敗",
-) -> requests.Response:
+    requests_module: Any,
+) -> Any:
     try:
         response = session.get(url, params=params, stream=True, timeout=30)
-    except requests.RequestException as exc:
+    except requests_module.RequestException as exc:
         log.exception("%s：%s", error_message, exc)
         raise RuntimeError(error_message) from exc
     return response
 
 
-def _is_html_response(response: requests.Response) -> bool:
+def _is_html_response(response: Any) -> bool:
     content_type = response.headers.get("Content-Type", "").lower()
     return "text/html" in content_type
 
@@ -179,3 +200,11 @@ def _emit_progress(
     if not cb:
         return
     cb(ModelDownloadProgress(stage=stage, current=current, total=total, message=message))
+
+
+def _get_requests_module() -> Any:
+    if importlib.util.find_spec("requests") is None:
+        message = "requests 尚未安裝，無法下載模型"
+        log.error(message)
+        raise RuntimeError(message)
+    return importlib.import_module("requests")

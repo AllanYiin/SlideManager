@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -53,6 +54,16 @@ class ChatTab(QWidget):
         row.addWidget(self.btn_cancel)
         root.addLayout(row)
 
+        prog_row = QHBoxLayout()
+        self.chat_prog = QProgressBar()
+        self.chat_prog.setRange(0, 100)
+        self.chat_prog.setValue(0)
+        self.chat_prog.setVisible(False)
+        self.chat_label = QLabel("")
+        prog_row.addWidget(self.chat_prog)
+        prog_row.addWidget(self.chat_label)
+        root.addLayout(prog_row)
+
         self.btn_send.clicked.connect(self.send)
         self.btn_cancel.clicked.connect(self.cancel_stream)
         self.input.returnPressed.connect(self.send)
@@ -62,6 +73,7 @@ class ChatTab(QWidget):
         self._messages = []
         self._current_assistant_buf = ""
         self.transcript.setText("")
+        self._set_chat_busy(False)
 
     def send(self) -> None:
         if not self.ctx:
@@ -74,31 +86,67 @@ class ChatTab(QWidget):
         text = (self.input.text() or "").strip()
         if not text:
             return
-        self.input.clear()
-
-        self._append_user(text)
-        self._messages.append({"role": "user", "content": text})
-
-        # 先做本機搜尋當作 context
-        q = SearchQuery(text=text, mode="hybrid", weight_text=0.5, weight_vector=0.5, top_k=5)
-        results = self.ctx.search.search(q)
-        context_lines = []
-        for i, r in enumerate(results, start=1):
-            s = r.slide
-            snippet = ((s.get("all_text", "") or "")[:200]).replace("\n", " ")
-            context_lines.append(
-                f"[{i}] {s.get('filename')} p{s.get('page')} | {s.get('title','')}. 內容摘要：{snippet}"
-            )
-        context = "\n".join(context_lines) if context_lines else "（未找到相關投影片）"
-
         if not (self.ctx.api_key or ""):
             msg = "尚未設定 API Key，對話功能無法連線至後端。請到「設定/診斷」設定後重試。"
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast(msg, level="warning", timeout_ms=12000)
             QMessageBox.information(self, "尚未設定 API Key", msg)
             return
+        self.input.clear()
 
-        # 有 API Key：串流回答
+        self._append_user(text)
+        self._messages.append({"role": "user", "content": text})
+
+        self._set_chat_busy(True, "準備回覆中...")
+
+        def task():
+            import traceback
+
+            try:
+                q = SearchQuery(text=text, mode="hybrid", weight_text=0.5, weight_vector=0.5, top_k=5)
+                results = self.ctx.search.search(q)
+                context_lines = []
+                for i, r in enumerate(results, start=1):
+                    s = r.slide
+                    snippet = ((s.get("all_text", "") or "")[:200]).replace("\n", " ")
+                    context_lines.append(
+                        f"[{i}] {s.get('filename')} p{s.get('page')} | {s.get('title','')}. 內容摘要：{snippet}"
+                    )
+                context = "\n".join(context_lines) if context_lines else "（未找到相關投影片）"
+                return {"ok": True, "context": context}
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"搜尋失敗，請稍後再試（{exc}）",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_context_ready)
+        w.signals.error.connect(self._on_context_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_context_ready(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            log.error("搜尋回傳格式不正確：%s", payload)
+            self._set_chat_busy(False)
+            msg = "搜尋失敗，請稍後再試"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+            QMessageBox.critical(self, "搜尋失敗", msg)
+            return
+        if not payload.get("ok"):
+            tb = payload.get("traceback", "")
+            if tb:
+                log.error("搜尋失敗\n%s", tb)
+            self._set_chat_busy(False)
+            msg = payload.get("message") or "搜尋失敗，請稍後再試"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+            QMessageBox.critical(self, "搜尋失敗", msg)
+            return
+        context = payload.get("context", "（未找到相關投影片）")
+
         system_prompt = (
             "你是『個人投影片管理』助理。\n"
             "請用繁體中文回答。\n"
@@ -110,16 +158,22 @@ class ChatTab(QWidget):
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": f"使用者問題：{text}\n\n相關投影片：\n{context}",
+                "content": f"使用者問題：{self._messages[-1]['content']}\n\n相關投影片：\n{context}",
             },
         ]
 
         self._start_stream(messages)
 
+    def _on_context_error(self, tb: str) -> None:
+        log.error("搜尋背景任務錯誤\n%s", tb)
+        self._set_chat_busy(False)
+        msg = "搜尋發生錯誤，請查看 logs/app.log"
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast(msg, level="error", timeout_ms=12000)
+        QMessageBox.critical(self, "搜尋失敗", msg)
+
     def _start_stream(self, messages: List[Dict[str, Any]]):
-        self.btn_send.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-        self._streaming = True
+        self._set_chat_busy(True, "串流回覆中...", streaming=True)
         self._current_assistant_buf = ""
         self._cancel_event = threading.Event()
         self.transcript.append("\n助理：")
@@ -163,9 +217,7 @@ class ChatTab(QWidget):
         self.transcript.moveCursor(self.transcript.textCursor().End)
 
     def _on_stream_done(self, result: object) -> None:
-        self.btn_send.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self._streaming = False
+        self._set_chat_busy(False)
         cancelled = bool(self._cancel_event and self._cancel_event.is_set())
         if cancelled:
             self.transcript.append("\n（已取消串流）")
@@ -187,15 +239,27 @@ class ChatTab(QWidget):
         box.setTextInteractionFlags(Qt.TextSelectableByMouse)
         box.setStandardButtons(QMessageBox.Close)
         box.exec()
-        self.btn_send.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self._streaming = False
+        self._set_chat_busy(False)
         self._cancel_event = None
 
     def cancel_stream(self) -> None:
         if self._cancel_event and not self._cancel_event.is_set():
             self._cancel_event.set()
             self.btn_cancel.setEnabled(False)
+
+    def _set_chat_busy(self, busy: bool, message: str = "", *, streaming: bool = False) -> None:
+        if busy:
+            self.chat_prog.setVisible(True)
+            self.chat_prog.setRange(0, 0)
+            self.chat_label.setText(message)
+        else:
+            self.chat_prog.setRange(0, 100)
+            self.chat_prog.setValue(0)
+            self.chat_prog.setVisible(False)
+            self.chat_label.setText("")
+        self.btn_send.setEnabled(not busy)
+        self.btn_cancel.setEnabled(busy and streaming)
+        self._streaming = busy and streaming
 
     def _append_user(self, text: str) -> None:
         self.transcript.append(f"\n使用者：{text}\n")

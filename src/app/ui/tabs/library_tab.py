@@ -503,26 +503,46 @@ class LibraryTab(QWidget):
         return selected
 
     # ---------- indexing ----------
-    def _choose_index_mode(self) -> tuple[bool, bool] | None:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Question)
-        box.setWindowTitle("選擇索引類型")
-        box.setText("請選擇要更新的索引類型：")
-        btn_full = box.addButton("完整索引（文字 + 圖像）", QMessageBox.AcceptRole)
-        btn_text = box.addButton("只更新文字索引", QMessageBox.AcceptRole)
-        btn_image = box.addButton("只更新圖像索引", QMessageBox.AcceptRole)
-        btn_cancel = box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(btn_full)
-        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked == btn_cancel:
-            return None
-        if clicked == btn_text:
-            return True, False
-        if clicked == btn_image:
-            return False, True
-        return True, True
+    def _choose_index_mode(self, files: List[Dict[str, Any]]) -> tuple[bool, bool] | None:
+        while True:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("選擇索引類型")
+            box.setText("請選擇要更新的索引類型：")
+
+            details, detail_long, legacy_needed, fill_needed = self._build_index_status_details(files)
+            if details:
+                box.setInformativeText(details)
+            if detail_long:
+                box.setDetailedText(detail_long)
+
+            btn_full = box.addButton("完整索引（文字 + 圖像）", QMessageBox.AcceptRole)
+            btn_text = box.addButton("只更新文字索引", QMessageBox.AcceptRole)
+            btn_image = box.addButton("只更新圖像索引", QMessageBox.AcceptRole)
+            btn_migrate = None
+            btn_fill = None
+            if legacy_needed:
+                btn_migrate = box.addButton("轉換舊版資料", QMessageBox.ActionRole)
+            if fill_needed:
+                btn_fill = box.addButton("補齊索引更新時間", QMessageBox.ActionRole)
+            btn_cancel = box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(btn_full)
+            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == btn_cancel:
+                return None
+            if btn_migrate and clicked == btn_migrate:
+                self._migrate_legacy_files()
+                continue
+            if btn_fill and clicked == btn_fill:
+                self._fill_missing_index_timestamps()
+                continue
+            if clicked == btn_text:
+                return True, False
+            if clicked == btn_image:
+                return False, True
+            return True, True
 
     def start_index_needed(self) -> None:
         if not self.ctx:
@@ -582,7 +602,7 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
             return
-        mode = self._choose_index_mode()
+        mode = self._choose_index_mode(files)
         if not mode:
             self._reset_prepare_ui()
             return
@@ -616,13 +636,161 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
-        mode = self._choose_index_mode()
+        mode = self._choose_index_mode(files)
         if not mode:
             self._reset_prepare_ui()
             return
         update_text, update_image = mode
         self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files, update_text, update_image))
         self._start_index(files, update_text, update_image)
+
+    def _build_index_status_details(
+        self, files: List[Dict[str, Any]]
+    ) -> tuple[str, str, bool, bool]:
+        if not self.ctx:
+            return "", "", False, False
+        store = self.ctx.store
+        paths = store.paths
+        manifest = store.load_manifest()
+        meta = store.load_meta()
+        meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
+        meta_slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+
+        total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
+        scope_files = len(files)
+        indexed_files = sum(1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed"))
+
+        missing_text_ts = 0
+        missing_image_ts = 0
+        for entry in meta_files.values():
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("last_text_extract_at"):
+                missing_text_ts += 1
+            if not entry.get("last_image_index_at"):
+                missing_image_ts += 1
+
+        thumbs_count = 0
+        try:
+            if paths.thumbs_dir.exists():
+                thumbs_count = sum(1 for _ in paths.thumbs_dir.iterdir() if _.is_file())
+        except Exception as exc:
+            log.warning("讀取縮圖快取數量失敗：%s", exc)
+
+        def fmt_time(ts: int | None) -> str:
+            if not ts:
+                return "未設定"
+            try:
+                return datetime.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return "時間格式錯誤"
+
+        def file_info(path: Path) -> str:
+            if not path.exists():
+                return "不存在"
+            try:
+                mtime = int(path.stat().st_mtime)
+                size = path.stat().st_size
+                return f"存在（{fmt_time(mtime)} | {size:,} bytes）"
+            except Exception:
+                return "存在（無法讀取時間/大小）"
+
+        legacy_needed = False
+        legacy_lines = []
+        legacy_candidates = [
+            ("project.json", paths.project_json, paths.app_state_json),
+            ("catalog.json", paths.catalog_json, paths.manifest_json),
+            ("index.json", paths.index_json, paths.meta_json),
+        ]
+        for legacy_name, legacy_path, new_path in legacy_candidates:
+            if legacy_path.exists() and not new_path.exists():
+                legacy_needed = True
+                legacy_lines.append(f"- {legacy_name} 存在，但 {new_path.name} 缺失")
+
+        fill_needed = missing_text_ts > 0 or missing_image_ts > 0
+
+        details = (
+            f"本次範圍：{scope_files} 個檔案\n"
+            f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
+            f"索引檔案（meta.json）：{len(meta_files)} | 投影片索引：{len(meta_slides)}\n"
+            f"縮圖快取：{thumbs_count} 張\n"
+            f"缺少更新時間：文字 {missing_text_ts} | 圖像 {missing_image_ts}"
+        )
+
+        detail_long_lines = [
+            "=== 檔案存在狀態 ===",
+            f"- app_state.json：{file_info(paths.app_state_json)}",
+            f"- project.json：{file_info(paths.project_json)}",
+            f"- manifest.json：{file_info(paths.manifest_json)}",
+            f"- catalog.json：{file_info(paths.catalog_json)}",
+            f"- meta.json：{file_info(paths.meta_json)}",
+            f"- index.json：{file_info(paths.index_json)}",
+            "",
+            "=== 索引時間概況 ===",
+            f"- 文字索引更新時間缺漏：{missing_text_ts} 個檔案",
+            f"- 圖像索引更新時間缺漏：{missing_image_ts} 個檔案",
+        ]
+        if legacy_lines:
+            detail_long_lines.append("")
+            detail_long_lines.append("=== 舊版資料檢測 ===")
+            detail_long_lines.extend(legacy_lines)
+
+        return details, "\n".join(detail_long_lines), legacy_needed, fill_needed
+
+    def _migrate_legacy_files(self) -> None:
+        if not self.ctx:
+            return
+        try:
+            store = self.ctx.store
+            app_state = store.load_app_state()
+            store.save_app_state(app_state)
+            manifest = store.load_manifest()
+            store.save_manifest(manifest)
+            meta = store.load_meta()
+            store.save_meta(meta)
+            QMessageBox.information(self, "轉換完成", "已完成舊版資料轉換並寫入新版檔案。")
+        except Exception:
+            log.exception("轉換舊版資料失敗")
+            QMessageBox.warning(self, "轉換失敗", "舊版資料轉換失敗，請查看 logs/ 了解詳細原因。")
+
+    def _fill_missing_index_timestamps(self) -> None:
+        if not self.ctx:
+            return
+        store = self.ctx.store
+        try:
+            meta = store.load_meta()
+            meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
+            if store.paths.meta_json.exists():
+                source_ts = int(store.paths.meta_json.stat().st_mtime)
+            elif store.paths.index_json.exists():
+                source_ts = int(store.paths.index_json.stat().st_mtime)
+            else:
+                source_ts = int(datetime.datetime.now().timestamp())
+            updated = 0
+            for key, entry in meta_files.items():
+                if not isinstance(entry, dict):
+                    continue
+                changed = False
+                if not entry.get("last_text_extract_at"):
+                    entry["last_text_extract_at"] = source_ts
+                    changed = True
+                if not entry.get("last_image_index_at"):
+                    entry["last_image_index_at"] = source_ts
+                    changed = True
+                if changed:
+                    meta_files[key] = entry
+                    updated += 1
+            if updated:
+                meta["files"] = meta_files
+                store.save_meta(meta)
+            QMessageBox.information(
+                self,
+                "補齊完成",
+                f"已補齊 {updated} 筆索引更新時間（來源：索引檔存檔日）。",
+            )
+        except Exception:
+            log.exception("補齊索引更新時間失敗")
+            QMessageBox.warning(self, "補齊失敗", "補齊索引更新時間失敗，請查看 logs/ 了解詳細原因。")
 
 
     def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool) -> None:
