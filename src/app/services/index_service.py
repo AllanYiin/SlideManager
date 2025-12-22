@@ -446,25 +446,30 @@ class IndexService:
         bm25_payload: List[str] = []
         embed_indices: List[int] = []
         embed_payload: List[str] = []
+        reuse_text_by_file_id = {
+            fd.file_entry.get("file_id"): fd.reuse_text for fd in staged_files if fd.file_entry.get("file_id")
+        }
 
         if update_text:
             for slide in all_slides:
                 slide_id = f"{slide.file_entry.get('file_id')}#{slide.page}"
+                file_id = slide.file_entry.get("file_id")
+                reuse_text = reuse_text_by_file_id.get(file_id, True)
                 meta_slide = meta_slides.get(slide_id, {})
                 meta_slide = dict(meta_slide) if isinstance(meta_slide, dict) else {}
                 flags = meta_slide.get("flags") if isinstance(meta_slide.get("flags"), dict) else {}
                 cached_tokens = meta_slide.get("bm25_tokens")
-                if isinstance(cached_tokens, list):
+                if reuse_text and isinstance(cached_tokens, list):
                     slide_tokens_by_id[slide_id] = cached_tokens
-                if flags.get("has_text_vec"):
+                if reuse_text and flags.get("has_text_vec"):
                     slide_text_vec_by_id[slide_id] = True
                 if slide.slide_text is None:
                     continue
                 text_content = slide.slide_text.all_text or ""
-                if text_content.strip() and not flags.get("has_bm25"):
+                if text_content.strip() and (not reuse_text or not flags.get("has_bm25")):
                     bm25_indices.append(slide.index)
                     bm25_payload.append(text_content)
-                if update_text_vectors and text_content.strip() and not flags.get("has_text_vec"):
+                if update_text_vectors and text_content.strip() and (not reuse_text or not flags.get("has_text_vec")):
                     embed_indices.append(slide.index)
                     embed_payload.append(text_content)
 
@@ -578,7 +583,7 @@ class IndexService:
                         meta_slide = meta_slides.get(slide_id, {})
                         meta_slide = dict(meta_slide) if isinstance(meta_slide, dict) else {}
                         flags = meta_slide.get("flags") if isinstance(meta_slide.get("flags"), dict) else {}
-                        if update_image_vectors and not flags.get("has_image_vec"):
+                        if update_image_vectors and (not fd.reuse_image or not flags.get("has_image_vec")):
                             image_paths.append(Path(slide.thumb_path))
                             image_slide_ids.append(slide_id)
             finally:
