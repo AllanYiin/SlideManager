@@ -13,7 +13,7 @@ import numpy as np
 from app.core.errors import ErrorCode, format_user_message
 from app.core.logging import get_logger
 from app.services.catalog_service import CatalogService
-from app.services.embedding_service import EmbeddingConfig, EmbeddingService
+from app.services.embedding_service import EmbeddingConfig, EmbeddingError, EmbeddingService
 from app.services.extraction_service import ExtractionService, SlideText
 from app.services.image_embedder import ImageEmbeddingService
 from app.services.project_store import ProjectStore
@@ -441,7 +441,7 @@ class IndexService:
                 if text_content.strip():
                     bm25_indices.append(slide.index)
                     bm25_payload.append(text_content)
-                if update_text_vectors and text_content.strip():
+                if update_text_vectors:
                     embed_indices.append(slide.index)
                     embed_payload.append(text_content)
 
@@ -466,7 +466,14 @@ class IndexService:
                     overall_total,
                     "產生文字向量中...",
                 )
-                text_vecs = self.embeddings.embed_text_batch(embed_payload)
+                try:
+                    text_vecs = self.embeddings.embed_text_batch(embed_payload)
+                except EmbeddingError as exc:
+                    msg = format_user_message(ErrorCode.OPENAI_ERROR, detail=str(exc))
+                    for fd in staged_files:
+                        self.catalog.mark_index_error(fd.abs_path, ErrorCode.OPENAI_ERROR.value, msg)
+                    log.error("[OPENAI_ERROR] 文字向量建立失敗：%s", exc)
+                    raise
             elif update_text:
                 if not embed_payload:
                     progress(
