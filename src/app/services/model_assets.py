@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,50 +68,68 @@ def _download_from_google_drive(
     on_progress: Optional[Callable[[ModelDownloadProgress], None]] = None,
 ) -> Path:
     requests_module = _get_requests_module()
-    url = "https://drive.google.com/uc"
-    params = {"id": file_id, "export": "download"}
     session = requests_module.Session()
 
-    response = _request_drive(
+    download_url = _fetch_drive_download_url(
         session,
-        url,
-        params=params,
+        file_id=file_id,
         requests_module=requests_module,
     )
 
-    if response.status_code != 200:
-        raise RuntimeError(f"Google Drive 回應碼 {response.status_code}")
+    if download_url:
+        response = _request_drive(
+            session,
+            download_url,
+            error_message="Google Drive 下載請求失敗",
+            requests_module=requests_module,
+        )
+    else:
+        url = "https://drive.google.com/uc"
+        params = {"id": file_id, "export": "download"}
 
-    token = _get_confirm_token(response)
-    if not token and _is_html_response(response):
-        token = _extract_confirm_token_from_html(response.text)
-
-    if token:
-        params["confirm"] = token
         response = _request_drive(
             session,
             url,
             params=params,
-            error_message="Google Drive 確認下載請求失敗",
             requests_module=requests_module,
         )
-        if response.status_code != 200:
-            raise RuntimeError(f"確認後下載仍失敗，回應碼 {response.status_code}")
 
-    if _is_html_response(response):
-        download_url = _extract_download_url_from_html(response.text)
-        if download_url:
+        if response.status_code != 200:
+            raise RuntimeError(f"Google Drive 回應碼 {response.status_code}")
+
+        token = _get_confirm_token(response)
+        if not token and _is_html_response(response):
+            token = _extract_confirm_token_from_html(response.text)
+
+        if token:
+            params["confirm"] = token
             response = _request_drive(
                 session,
-                download_url,
-                error_message="Google Drive 轉向下載失敗",
+                url,
+                params=params,
+                error_message="Google Drive 確認下載請求失敗",
                 requests_module=requests_module,
             )
+            if response.status_code != 200:
+                raise RuntimeError(f"確認後下載仍失敗，回應碼 {response.status_code}")
+
         if _is_html_response(response):
-            raise RuntimeError(
-                "Google Drive 回傳警示頁面，請確認檔案分享權限，或手動下載後放到："
-                f"{target_path}"
-            )
+            download_url = _extract_download_url_from_html(response.text)
+            if download_url:
+                response = _request_drive(
+                    session,
+                    download_url,
+                    error_message="Google Drive 轉向下載失敗",
+                    requests_module=requests_module,
+                )
+            if _is_html_response(response):
+                raise RuntimeError(
+                    "Google Drive 回傳警示頁面，請確認檔案分享權限，或手動下載後放到："
+                    f"{target_path}"
+                )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Google Drive 回應碼 {response.status_code}")
 
     total = int(response.headers.get("Content-Length") or 0)
     downloaded = 0
@@ -174,15 +193,65 @@ def _request_drive(
     url: str,
     *,
     params: Optional[dict] = None,
+    headers: Optional[dict] = None,
     error_message: str = "Google Drive 下載請求失敗",
     requests_module: Any,
 ) -> Any:
     try:
-        response = session.get(url, params=params, stream=True, timeout=30)
+        response = session.get(url, params=params, headers=headers, stream=True, timeout=30)
     except requests_module.RequestException as exc:
         log.exception("%s：%s", error_message, exc)
         raise RuntimeError(error_message) from exc
     return response
+
+
+def _fetch_drive_download_url(
+    session: Any,
+    *,
+    file_id: str,
+    requests_module: Any,
+) -> Optional[str]:
+    url = "https://drive.usercontent.google.com/uc"
+    params = {"id": file_id, "authuser": "0", "export": "download"}
+    options_headers = {
+        "Origin": "https://drive.google.com",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "x-drive-first-party,x-json-requested",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/132.0.0.0 Safari/537.36"
+        ),
+    }
+    try:
+        options_response = session.options(url, headers=options_headers, timeout=30)
+        if options_response.status_code != 200:
+            log.warning("Google Drive OPTIONS 失敗，回應碼 %s", options_response.status_code)
+            return None
+        post_headers = {
+            "Origin": "https://drive.google.com",
+            "Referer": "https://drive.google.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/132.0.0.0 Safari/537.36"
+            ),
+            "X-Drive-First-Party": "DriveWebUi",
+            "X-JSON-Requested": "true",
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+        }
+        post_response = session.post(url, params=params, headers=post_headers, timeout=30)
+        if post_response.status_code != 200:
+            log.warning("Google Drive POST 失敗，回應碼 %s", post_response.status_code)
+            return None
+        payload = post_response.text.split("\n")[-1]
+        data = json.loads(payload)
+        return data.get("downloadUrl")
+    except (requests_module.RequestException, json.JSONDecodeError, ValueError) as exc:
+        log.exception("Google Drive 下載 URL 解析失敗：%s", exc)
+        return None
 
 
 def _is_html_response(response: Any) -> bool:
