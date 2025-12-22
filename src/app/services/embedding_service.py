@@ -151,12 +151,13 @@ class EmbeddingService:
                 return vecs[0] if vecs else []
             except Exception as exc:
                 log.warning(
-                    "[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s | text_id=%s chars=%s est_tokens=%s",
+                    "[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s | text_id=%s chars=%s est_tokens=%s | text=%s",
                     attempt,
                     exc,
                     self._cache_key(text),
                     len(text),
                     self._estimate_tokens(text),
+                    text,
                 )
                 if attempt < len(delays):
                     time.sleep(delay)
