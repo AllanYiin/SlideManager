@@ -304,6 +304,8 @@ class LibraryTab(QWidget):
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):
             self.main_window.dashboard_tab.refresh_metrics()
+        if hasattr(self.main_window, "page_status_tab"):
+            self.main_window.page_status_tab.refresh_data()
         cat = self.ctx.store.load_manifest() if self.ctx else {}
         scan_errors = cat.get("scan_errors") if isinstance(cat, dict) else None
         if scan_errors:
@@ -724,8 +726,10 @@ class LibraryTab(QWidget):
             self.prog_label.setText(display_msg)
             if msg:
                 self.main_window.status.showMessage(msg)
-            if stage in {"file_done", "skip", "extracted"}:
+            if stage in {"file_done", "skip", "extracted", "slide_batch", "pause", "done"}:
                 self._schedule_index_refresh()
+                if hasattr(self.main_window, "page_status_tab"):
+                    self.main_window.page_status_tab.refresh_data()
         except Exception:
             log.exception("更新索引進度失敗")
 
