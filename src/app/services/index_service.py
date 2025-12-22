@@ -61,8 +61,8 @@ class FileStageData:
     start_mtime: int
     start_size: int
     slides: List[SlideWork]
-    reuse_text: bool = False
-    reuse_image: bool = False
+    reuse_text: bool = True
+    reuse_image: bool = True
 
 
 class IndexService:
