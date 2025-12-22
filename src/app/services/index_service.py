@@ -114,6 +114,10 @@ class IndexService:
             if indexed_at <= 0 or mtime > indexed_at:
                 needed.append(f)
                 continue
+            index_mode = f.get("index_mode") or "none"
+            if index_mode in {"none", "text_only", "image_only"}:
+                needed.append(f)
+                continue
             slide_count = f.get("slide_count")
             if slide_count is not None:
                 try:
