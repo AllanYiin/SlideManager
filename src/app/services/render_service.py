@@ -262,6 +262,8 @@ class WindowsComRenderer:
             return
         try:
             self._powerpoint.Quit()
+        except Exception:
+            log.exception("關閉 PowerPoint 失敗")
         finally:
             self._powerpoint = None
 
@@ -355,7 +357,10 @@ class RenderService:
             return
         renderer = available[0]
         if hasattr(renderer, "end_batch"):
-            renderer.end_batch()
+            try:
+                renderer.end_batch()
+            except Exception:
+                log.exception("結束 renderer 批次作業失敗（%s）", renderer.name)
 
     def _thumb_path(self, file_id: str, page: int) -> Path:
         target_dir = self.thumbs_dir / file_id
