@@ -70,14 +70,12 @@ class EmbeddingService:
             missing_indices.append(i)
 
         if missing_texts and self._client:
-            vecs = self._fetch_embeddings_with_retry(missing_texts)
-            for idx, t in enumerate(missing_texts):
-                pos = missing_indices[idx]
-                if idx < len(vecs):
-                    v = self._align_dim(np.asarray(vecs[idx], dtype=np.float32))
+            for text, pos in zip(missing_texts, missing_indices):
+                vec = self._fetch_embedding_with_retry(text)
+                if vec:
+                    v = self._align_dim(np.asarray(vec, dtype=np.float32))
                     out[pos] = normalize_l2(v)
-
-                    self._cache[self._cache_key(t)] = self._to_cache_list(v)
+                    self._cache[self._cache_key(text)] = self._to_cache_list(v)
                 else:
                     out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
             self._save_cache()
@@ -115,13 +113,14 @@ class EmbeddingService:
         except Exception as exc:
             log.warning("寫入 embedding cache 失敗：%s", exc)
 
-    def _fetch_embeddings_with_retry(self, texts: List[str]) -> List[List[float]]:
+    def _fetch_embedding_with_retry(self, text: str) -> List[float]:
         if not self._client:
             return []
         delays = [0.5, 1.0, 2.0]
         for attempt, delay in enumerate(delays, start=1):
             try:
-                return self._client.embed_texts(texts, self.cfg.text_model)
+                vecs = self._client.embed_texts([text], self.cfg.text_model)
+                return vecs[0] if vecs else []
             except Exception as exc:
                 log.warning("[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s", attempt, exc)
                 if attempt < len(delays):
@@ -140,6 +139,4 @@ class EmbeddingService:
 
     def _to_cache_list(self, v: np.ndarray) -> List[float]:
         arr = np.asarray(v, dtype=np.float32).reshape(-1)
-        if hasattr(arr, "tolist"):
-            return list(arr.tolist())
-        return list(arr)
+        return [float(x) for x in arr]
