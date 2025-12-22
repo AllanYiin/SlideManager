@@ -63,6 +63,7 @@ class OpenAIClient:
             emb = getattr(item, "embedding", None) if item else None
             if emb is None:
                 continue
+
             if isinstance(emb, list):
                 out.append(emb)
             else:

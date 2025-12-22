@@ -81,6 +81,7 @@ class EmbeddingService:
                     v = self._align_dim(np.asarray(vec, dtype=np.float32))
                     out[pos] = normalize_l2(v)
                     self._cache[self._cache_key(t)] = self._to_cache_list(v)
+
                 else:
                     out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
             self._save_cache()
@@ -119,29 +120,7 @@ class EmbeddingService:
             log.warning("寫入 embedding cache 失敗：%s", exc)
 
     def _fetch_embedding_with_retry(self, text: str) -> List[float]:
-        if not self._client:
-            return []
-        chunks = self._split_text(text)
-        if not chunks:
-            return []
-        if len(chunks) == 1:
-            return self._fetch_embedding_single_with_retry(chunks[0])
-        log.warning(
-            "文字過長，將拆分為 %s 段進行 embeddings（OPENAI_EMBED_MAX_CHARS=%s）",
-            len(chunks),
-            self._max_chars,
-        )
-        vectors: List[np.ndarray] = []
-        for chunk in chunks:
-            vec = self._fetch_embedding_single_with_retry(chunk)
-            if not vec:
-                return []
-            vectors.append(np.asarray(vec, dtype=np.float32))
-        stacked = np.stack(vectors, axis=0)
-        averaged = np.mean(stacked, axis=0)
-        return list(averaged)
 
-    def _fetch_embedding_single_with_retry(self, text: str) -> List[float]:
         if not self._client:
             return []
         delays = [0.5, 1.0, 2.0]
@@ -209,6 +188,4 @@ class EmbeddingService:
 
     def _to_cache_list(self, v: np.ndarray) -> List[float]:
         arr = np.asarray(v, dtype=np.float32).reshape(-1)
-        if hasattr(arr, "tolist"):
-            return list(arr.tolist())
-        return list(arr)
+        return [float(x) for x in arr]
