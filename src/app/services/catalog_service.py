@@ -135,7 +135,7 @@ class CatalogService:
         on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
         progress_every: int = 10,
     ) -> Dict[str, Any]:
-        """掃描白名單目錄，更新 catalog.json。"""
+        """掃描白名單目錄，更新 manifest.json。"""
         whitelist = self._load_whitelist()
         existing = self.store.load_manifest().get("files", [])
         by_path = {e.get("abs_path"): e for e in existing if isinstance(e, dict) and e.get("abs_path")}

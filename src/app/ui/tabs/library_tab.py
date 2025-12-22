@@ -723,7 +723,6 @@ class LibraryTab(QWidget):
         legacy_lines = []
         legacy_candidates = [
             ("project.json", paths.project_json, paths.app_state_json),
-            ("catalog.json", paths.catalog_json, paths.manifest_json),
             ("index.json", paths.index_json, paths.slide_pages_json),
         ]
         for legacy_name, legacy_path, new_path in legacy_candidates:
@@ -746,7 +745,6 @@ class LibraryTab(QWidget):
             f"- app_state.json：{file_info(paths.app_state_json)}",
             f"- project.json：{file_info(paths.project_json)}",
             f"- manifest.json：{file_info(paths.manifest_json)}",
-            f"- catalog.json：{file_info(paths.catalog_json)}",
             f"- slide_pages.json：{file_info(paths.slide_pages_json)}",
             f"- index.json：{file_info(paths.index_json)}",
             "",
