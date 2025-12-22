@@ -50,18 +50,22 @@ class OpenAIClient:
         self._rate_limiter = _RateLimiter(rpm) if rpm > 0 else None
 
     def embed_texts(self, texts: List[str], model: str) -> List[List[float]]:
-        """同步 embeddings。"""
-        if self._rate_limiter:
-            self._rate_limiter.wait()
-        resp = self._client.embeddings.create(
-            model=model,
-            input=texts,
-        )
-        # openai python 回傳 resp.data 是 list，元素有 embedding
+        """同步 embeddings（逐筆查詢）。"""
         out: List[List[float]] = []
-        for item in getattr(resp, "data", []) or []:
-            emb = getattr(item, "embedding", None)
-            if emb is not None:
+        for text in texts:
+            if self._rate_limiter:
+                self._rate_limiter.wait()
+            resp = self._client.embeddings.create(
+                model=model,
+                input=text,
+            )
+            item = (getattr(resp, "data", []) or [None])[0]
+            emb = getattr(item, "embedding", None) if item else None
+            if emb is None:
+                continue
+            if isinstance(emb, list):
+                out.append(emb)
+            else:
                 out.append(list(emb))
         return out
 
