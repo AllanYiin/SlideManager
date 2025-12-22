@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -46,10 +47,14 @@ class SearchService:
         self.embeddings = EmbeddingService(api_key, self.emb_cfg, cache_dir=self.store.paths.cache_dir)
 
     def search(self, q: SearchQuery, image_vec: Optional[np.ndarray] = None) -> List[SearchResult]:
-        meta = self.store.load_meta()
-        files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-        slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
-        slides = self._build_slide_views(slides_map, files)
+        manifest = self.store.load_manifest()
+        files = {
+            f.get("file_id"): f
+            for f in manifest.get("files", [])
+            if isinstance(f, dict) and f.get("file_id")
+        }
+        slide_pages = self.store.load_slide_pages()
+        slides = self._build_slide_views(slide_pages, files, self.store.paths.thumbs_dir)
         if not slides:
             return []
 
@@ -182,28 +187,41 @@ class SearchService:
 
     @staticmethod
     def _build_slide_views(
-        slides_map: Dict[str, Any],
+        slide_pages: Dict[str, str],
         files: Dict[str, Any],
+        thumbs_dir: Optional[str | Path] = None,
     ) -> List[Dict[str, Any]]:
         slides: List[Dict[str, Any]] = []
-        for slide_id, slide in slides_map.items():
-            if not isinstance(slide, dict):
+        for slide_id, text in slide_pages.items():
+            if not isinstance(slide_id, str):
                 continue
-            file_id = slide.get("file_id")
+            if "#" not in slide_id:
+                continue
+            file_id, page_raw = slide_id.split("#", 1)
+            try:
+                page = int(page_raw)
+            except Exception:
+                page = None
             file_entry = files.get(file_id, {}) if isinstance(files.get(file_id), dict) else {}
+            thumb_path = None
+            if thumbs_dir and page:
+                thumb_candidate = Path(thumbs_dir) / file_id / f"{page}.png"
+                if thumb_candidate.exists():
+                    thumb_path = str(thumb_candidate)
+            text_value = "" if text is None else str(text)
             slides.append(
                 {
                     "slide_id": slide_id,
                     "file_id": file_id,
-                    "file_path": file_entry.get("path", ""),
-                    "filename": file_entry.get("name", ""),
-                    "page": slide.get("slide_no"),
-                    "title": slide.get("title", ""),
-                    "text_for_bm25": slide.get("text_for_bm25", ""),
-                    "all_text": slide.get("text_for_bm25", ""),
-                    "bm25_tokens": slide.get("bm25_tokens", []),
-                    "thumb_path": slide.get("thumbnail_path"),
-                    "flags": slide.get("flags", {}),
+                    "file_path": file_entry.get("abs_path", ""),
+                    "filename": file_entry.get("filename", ""),
+                    "page": page,
+                    "title": "",
+                    "text_for_bm25": text_value,
+                    "all_text": text_value,
+                    "bm25_tokens": tokenize(text_value),
+                    "thumb_path": thumb_path,
+                    "flags": {},
                 }
             )
         return slides

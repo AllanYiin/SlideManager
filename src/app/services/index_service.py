@@ -98,10 +98,8 @@ class IndexService:
 
     def compute_needed_files(self) -> List[Dict[str, Any]]:
         manifest = self.store.load_manifest()
-        meta = self.store.load_meta()
         files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
-        meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-        meta_slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+        slide_pages = self.store.load_slide_pages()
 
         needed: List[Dict[str, Any]] = []
         for f in files:
@@ -111,36 +109,20 @@ class IndexService:
             if not file_id:
                 needed.append(f)
                 continue
-            meta_entry = meta_files.get(file_id, {})
-            if not isinstance(meta_entry, dict) or not meta_entry:
-                needed.append(f)
-                continue
             mtime = int(f.get("modified_time") or 0)
-            last_text = int(meta_entry.get("last_text_extract_at") or 0)
-            last_image = int(meta_entry.get("last_image_index_at") or 0)
-            if mtime > last_text or mtime > last_image:
+            indexed_at = int(f.get("indexed_at") or 0)
+            if indexed_at <= 0 or mtime > indexed_at:
                 needed.append(f)
                 continue
             slide_count = f.get("slide_count")
-            meta_slide_count = meta_entry.get("slide_count")
-            if slide_count is not None and meta_slide_count is not None:
-                try:
-                    if int(slide_count) != int(meta_slide_count):
-                        needed.append(f)
-                        continue
-                except Exception:
-                    needed.append(f)
-                    continue
             if slide_count is not None:
                 try:
                     slide_total = int(slide_count)
                 except Exception:
                     slide_total = 0
                 if slide_total > 0:
-                    slide_in_meta = sum(
-                        1 for s in meta_slides.values() if isinstance(s, dict) and s.get("file_id") == file_id
-                    )
-                    if slide_in_meta < slide_total:
+                    slide_in_pages = sum(1 for key in slide_pages.keys() if key.startswith(f"{file_id}#"))
+                    if slide_in_pages < slide_total:
                         needed.append(f)
                         continue
         return needed
@@ -206,46 +188,25 @@ class IndexService:
                 if cancel_flag and cancel_flag():
                     return False
                 if not paused_notified:
-                    flush_pending_slides(save_snapshot=True)
+                    save_slide_pages(force=True)
                     progress("pause", cur, total, "已暫停，等待續跑...")
                     paused_notified = True
                 time.sleep(0.2)
             return True
 
-        meta = self.store.load_meta()
-        meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
-        meta_slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+        slide_pages = self.store.load_slide_pages() if update_text else {}
+        slide_pages_updates = 0
 
-        pending_slide_patch: Dict[str, Any] = {}
-        slide_updates_total = 0
-
-        def flush_pending_slides(*, save_snapshot: bool = False) -> None:
-            nonlocal pending_slide_patch
-            if pending_slide_patch:
-                self.store.append_meta_log({"slides": pending_slide_patch})
-                pending_slide_patch = {}
-            if save_snapshot:
+        def save_slide_pages(*, force: bool = False) -> None:
+            nonlocal slide_pages_updates
+            if not update_text:
+                return
+            if force or slide_pages_updates >= 100:
                 try:
-                    meta["files"] = meta_files
-                    meta["slides"] = meta_slides
-                    self.store.save_meta(meta)
+                    self.store.save_slide_pages(slide_pages)
                 except Exception as exc:
-                    log.warning("暫停時保存索引狀態失敗：%s", exc)
-
-        def slide_meta_by_no(file_id: str) -> Dict[int, Dict[str, Any]]:
-            out: Dict[int, Dict[str, Any]] = {}
-            for slide_key, slide_val in meta_slides.items():
-                if not isinstance(slide_val, dict):
-                    continue
-                if slide_val.get("file_id") != file_id:
-                    continue
-                try:
-                    slide_no = int(slide_val.get("slide_no") or 0)
-                except Exception:
-                    continue
-                if slide_no > 0:
-                    out[slide_no] = slide_val
-            return out
+                    log.warning("保存 slide_pages.json 失敗：%s", exc)
+                slide_pages_updates = 0
 
         total_files = len(files)
         stage2_units = 0
@@ -299,43 +260,34 @@ class IndexService:
 
             slide_count = int(f.get("slide_count") or 0)
 
-            meta_entry = meta_files.get(file_id, {})
-            meta_entry = dict(meta_entry) if isinstance(meta_entry, dict) else {}
-            try:
-                meta_slide_count = int(meta_entry.get("slide_count") or 0)
-            except Exception:
-                meta_slide_count = 0
-            if meta_slide_count > slide_count:
-                slide_count = meta_slide_count
-            slides_by_no = slide_meta_by_no(file_id)
-
             cached_texts_by_no: Dict[int, SlideText] = {}
-            cached_text_valid = int(meta_entry.get("last_text_extract_at") or 0) >= start_mtime
+            cached_text_valid = int(f.get("indexed_at") or 0) >= start_mtime
             if update_text and cached_text_valid:
-                for slide_no, slide_entry in slides_by_no.items():
-                    if not isinstance(slide_entry, dict):
+                for slide_key, slide_text in slide_pages.items():
+                    if not isinstance(slide_key, str):
                         continue
-                    if "text_for_bm25" not in slide_entry:
+                    if not slide_key.startswith(f"{file_id}#"):
+                        continue
+                    try:
+                        slide_no = int(slide_key.split("#", 1)[1])
+                    except Exception:
                         continue
                     cached_texts_by_no[slide_no] = SlideText(
                         page=slide_no,
-                        title=str(slide_entry.get("title") or ""),
-                        body=str(slide_entry.get("body_text") or ""),
-                        all_text=str(slide_entry.get("text_for_bm25") or ""),
+                        title="",
+                        body="",
+                        all_text=str(slide_text or ""),
                     )
+                if slide_count <= 0 and cached_texts_by_no:
+                    slide_count = max(cached_texts_by_no.keys())
 
             cached_thumbs_by_no: Dict[int, str] = {}
-            cached_image_valid = int(meta_entry.get("last_image_index_at") or 0) >= start_mtime
-            if update_image and cached_image_valid:
-                for slide_no, slide_entry in slides_by_no.items():
-                    if not isinstance(slide_entry, dict):
-                        continue
-                    thumb_path = slide_entry.get("thumbnail_path")
-                    if not thumb_path:
-                        continue
-                    if not Path(str(thumb_path)).exists():
-                        continue
-                    cached_thumbs_by_no[slide_no] = str(thumb_path)
+            if update_image and slide_count > 0:
+                thumbs_dir = self.store.paths.thumbs_dir / file_id
+                for slide_no in range(1, slide_count + 1):
+                    thumb_path = thumbs_dir / f"{slide_no}.png"
+                    if thumb_path.exists():
+                        cached_thumbs_by_no[slide_no] = str(thumb_path)
 
             reuse_text = False
             slide_texts: List[SlideText] = []
@@ -372,7 +324,7 @@ class IndexService:
                         slide_texts = extracted or list(cached_texts_by_no.values())
 
             reuse_image = False
-            if update_image and cached_image_valid:
+            if update_image:
                 missing_image = False
                 if slide_count > 0:
                     missing_image = any(slide_no not in cached_thumbs_by_no for slide_no in range(1, slide_count + 1))
@@ -457,36 +409,21 @@ class IndexService:
                 all_slides.append(slide)
 
         text_vectors_to_append: Dict[str, np.ndarray] = {}
-        slide_tokens_by_id: Dict[str, List[str]] = {}
-        slide_text_vec_by_id: Dict[str, Optional[bool]] = {}
         bm25_indices: List[int] = []
         bm25_payload: List[str] = []
         embed_indices: List[int] = []
         embed_payload: List[str] = []
-        reuse_text_by_file_id = {
-            fd.file_entry.get("file_id"): fd.reuse_text for fd in staged_files if fd.file_entry.get("file_id")
-        }
 
         if update_text:
             for slide in all_slides:
                 slide_id = f"{slide.file_entry.get('file_id')}#{slide.page}"
-                file_id = slide.file_entry.get("file_id")
-                reuse_text = reuse_text_by_file_id.get(file_id, True)
-                meta_slide = meta_slides.get(slide_id, {})
-                meta_slide = dict(meta_slide) if isinstance(meta_slide, dict) else {}
-                flags = meta_slide.get("flags") if isinstance(meta_slide.get("flags"), dict) else {}
-                cached_tokens = meta_slide.get("bm25_tokens")
-                if reuse_text and isinstance(cached_tokens, list):
-                    slide_tokens_by_id[slide_id] = cached_tokens
-                if reuse_text and flags.get("has_text_vec"):
-                    slide_text_vec_by_id[slide_id] = True
                 if slide.slide_text is None:
                     continue
                 text_content = slide.slide_text.all_text or ""
-                if text_content.strip() and (not reuse_text or not flags.get("has_bm25")):
+                if text_content.strip():
                     bm25_indices.append(slide.index)
                     bm25_payload.append(text_content)
-                if update_text_vectors and text_content.strip() and (not reuse_text or not flags.get("has_text_vec")):
+                if update_text_vectors and text_content.strip():
                     embed_indices.append(slide.index)
                     embed_payload.append(text_content)
 
@@ -539,12 +476,6 @@ class IndexService:
         if cancel_flag and cancel_flag():
             return 1, "已取消"
 
-        for idx, slide_idx in enumerate(bm25_indices):
-            slide = all_slides[slide_idx]
-            slide_id = f"{slide.file_entry.get('file_id')}#{slide.page}"
-            tok = bm25_tokens[idx] if idx < len(bm25_tokens) else []
-            slide_tokens_by_id[slide_id] = tok
-
         for idx, slide_idx in enumerate(embed_indices):
             slide = all_slides[slide_idx]
             slide_id = f"{slide.file_entry.get('file_id')}#{slide.page}"
@@ -552,9 +483,6 @@ class IndexService:
                 vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
                 vec = np.asarray(text_vecs[idx], dtype=vec_dtype)
                 text_vectors_to_append[slide_id] = vec
-                slide_text_vec_by_id[slide_id] = True
-            else:
-                slide_text_vec_by_id[slide_id] = False
 
         if update_text and text_vectors_to_append:
             self.store.append_text_vectors(text_vectors_to_append)
@@ -597,10 +525,7 @@ class IndexService:
                         if not slide.thumb_path:
                             continue
                         slide_id = f"{file_id}#{slide.page}"
-                        meta_slide = meta_slides.get(slide_id, {})
-                        meta_slide = dict(meta_slide) if isinstance(meta_slide, dict) else {}
-                        flags = meta_slide.get("flags") if isinstance(meta_slide.get("flags"), dict) else {}
-                        if update_image_vectors and (not fd.reuse_image or not flags.get("has_image_vec")):
+                        if update_image_vectors:
                             image_paths.append(Path(slide.thumb_path))
                             image_slide_ids.append(slide_id)
             finally:
@@ -656,106 +581,27 @@ class IndexService:
             if not file_id:
                 continue
 
-            file_entry = meta_files.get(file_id, {})
-            file_entry = dict(file_entry) if isinstance(file_entry, dict) else {}
-            file_entry.update(
-                {
-                    "path": fd.abs_path,
-                    "name": fd.pptx.name,
-                    "mtime": fd.start_mtime,
-                    "size": fd.start_size,
-                    "slide_count": fd.slide_count,
-                }
-            )
-            if update_text:
-                file_entry["last_text_extract_at"] = now
-            if update_image:
-                file_entry["last_image_index_at"] = now
-            meta_files[file_id] = file_entry
-
-            for slide_key, slide_val in list(meta_slides.items()):
-                if not isinstance(slide_val, dict):
-                    continue
-                if slide_val.get("file_id") != file_id:
-                    continue
-                if int(slide_val.get("slide_no") or 0) > fd.slide_count:
-                    meta_slides.pop(slide_key, None)
-
-            slides_patch: Dict[str, Any] = {}
             text_indexed_count = 0
             image_indexed_count = 0
             bm25_indexed_count = 0
 
             for slide in fd.slides:
                 slide_id = f"{file_id}#{slide.page}"
-                prev = meta_slides.get(slide_id, {})
-                prev = dict(prev) if isinstance(prev, dict) else {}
-                flags = prev.get("flags") if isinstance(prev.get("flags"), dict) else {}
-
-                if update_text and slide.slide_text is not None:
-                    all_text = slide.slide_text.all_text or ""
-                    title = slide.slide_text.title or ""
-                    body = slide.slide_text.body or ""
-                    tokens = slide_tokens_by_id.get(slide_id, [])
-                    has_text = bool(all_text.strip())
-                    text_vec_cached = slide_text_vec_by_id.get(slide_id)
-                    if text_vec_cached is None:
-                        text_vec_cached = bool(flags.get("has_text_vec"))
-                    flags.update(
-                        {
-                            "has_text": has_text,
-                            "has_text_vec": bool(text_vec_cached),
-                            "has_bm25": True,
-                        }
-                    )
-                    prev.update(
-                        {
-                            "title": title,
-                            "body_text": body,
-                            "text_for_bm25": all_text,
-                            "bm25_tokens": tokens,
-                        }
-                    )
-                    if has_text:
+                if update_text:
+                    text_value = ""
+                    if slide.slide_text is not None:
+                        text_value = slide.slide_text.all_text or ""
+                    slide_pages[slide_id] = text_value
+                    slide_pages_updates += 1
+                    save_slide_pages(force=False)
+                    if text_value.strip():
                         text_indexed_count += 1
-                    if flags.get("has_bm25"):
                         bm25_indexed_count += 1
 
-                if update_image:
-                    thumb_path = slide.thumb_path or prev.get("thumbnail_path")
-                    if thumb_path:
-                        prev["thumbnail_path"] = thumb_path
-                    flags["has_image"] = bool(thumb_path)
-                    if update_image_vectors and thumb_path:
-                        flags["has_image_vec"] = True
-                    else:
-                        flags["has_image_vec"] = bool(flags.get("has_image_vec"))
-                    if flags.get("has_image"):
-                        image_indexed_count += 1
+                if update_image and slide.thumb_path:
+                    image_indexed_count += 1
 
-                prev.update(
-                    {
-                        "file_id": file_id,
-                        "slide_no": slide.page,
-                        "flags": flags,
-                        "updated_at": now,
-                    }
-                )
-                meta_slides[slide_id] = prev
-                slides_patch[slide_id] = prev
-                pending_slide_patch[slide_id] = prev
-                slide_updates_total += 1
-                if slide_updates_total % 100 == 0:
-                    flush_pending_slides()
-                    progress(
-                        "slide_batch",
-                        total_files + stage2_units + fi,
-                        overall_total,
-                        f"頁面狀態已更新 {slide_updates_total} 頁",
-                    )
-
-            flush_pending_slides()
-            self.store.append_meta_log({"files": {file_id: file_entry}})
+            save_slide_pages(force=False)
             self.catalog.mark_indexed(
                 fd.abs_path,
                 slides_count=fd.slide_count,
@@ -771,9 +617,7 @@ class IndexService:
                 f"已更新索引：{fd.pptx.name}",
             )
 
-        meta["files"] = meta_files
-        meta["slides"] = meta_slides
-        self.store.save_meta(meta)
+        save_slide_pages(force=True)
 
         manifest = self.store.load_manifest()
         manifest["embedding"] = {

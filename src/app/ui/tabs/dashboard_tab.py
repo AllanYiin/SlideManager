@@ -208,16 +208,42 @@ class DashboardTab(QWidget):
             return DashboardMetrics()
         try:
             catalog = self.ctx.store.load_manifest()
-            meta = self.ctx.store.load_meta()
             files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
-            slides_map = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
-            slides = [s for s in slides_map.values() if isinstance(s, dict)]
-            meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
+            slide_pages = self.ctx.store.load_slide_pages()
+            text_vectors = self.ctx.store.load_text_vectors()
+            image_vectors = self.ctx.store.load_image_vectors()
         except Exception as exc:
             log.error("Dashboard 讀取資料失敗：%s", exc)
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast("Dashboard 讀取資料失敗，已寫入 logs/app.log。", level="error")
             return DashboardMetrics()
+
+        slides = []
+        for slide_id, text in slide_pages.items():
+            if not isinstance(slide_id, str) or "#" not in slide_id:
+                continue
+            file_id, page_raw = slide_id.split("#", 1)
+            try:
+                page_no = int(page_raw)
+            except Exception:
+                page_no = None
+            text_value = "" if text is None else str(text)
+            thumb_path = self.ctx.store.paths.thumbs_dir / file_id / f"{page_no}.png" if page_no else None
+            flags = {
+                "has_text": bool(text_value.strip()),
+                "has_bm25": bool(text_value.strip()),
+                "has_text_vec": slide_id in text_vectors,
+                "has_image": bool(thumb_path and thumb_path.exists()),
+                "has_image_vec": slide_id in image_vectors,
+            }
+            slides.append(
+                {
+                    "slide_id": slide_id,
+                    "file_id": file_id,
+                    "slide_no": page_no,
+                    "flags": flags,
+                }
+            )
 
         docs = [f for f in files if not f.get("missing")]
         doc_total = len(docs)
@@ -230,7 +256,6 @@ class DashboardTab(QWidget):
             status = classify_doc_status(
                 entry,
                 slides=[s for s in slides if s.get("file_id") == entry.get("file_id")],
-                meta_file=meta_files.get(entry.get("file_id")),
             )
             if status == "indexed":
                 doc_indexed += 1

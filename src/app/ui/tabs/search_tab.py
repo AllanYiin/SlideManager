@@ -171,9 +171,8 @@ class SearchTab(QWidget):
             return
         if self._search_inflight:
             return
-        meta = self.ctx.store.load_meta()
-        slides = meta.get("slides", {}) if isinstance(meta, dict) else {}
-        if not slides:
+        slide_pages = self.ctx.store.load_slide_pages()
+        if not slide_pages:
             msg = "尚未建立索引，請先在「檔案庫/索引」執行掃描與索引。"
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast(msg, level="warning", timeout_ms=12000)

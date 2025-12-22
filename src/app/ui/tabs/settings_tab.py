@@ -198,14 +198,13 @@ class SettingsTab(QWidget):
             return
         try:
             manifest = self.ctx.store.load_manifest()
-            meta = self.ctx.store.load_meta()
             emb = manifest.get("embedding", {})
 
             lines = []
             lines.append(f"專案路徑：{self.ctx.project_root}")
             lines.append(f"白名單目錄數：{len(self.ctx.catalog.get_whitelist_dirs())}")
-            slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
-            lines.append(f"已索引投影片：{len(slides)}")
+            slide_pages = self.ctx.store.load_slide_pages()
+            lines.append(f"已索引投影片：{len(slide_pages)}")
             lines.append("")
             lines.append("[Embedding]")
             lines.append(f"text_model：{emb.get('text_model')}")

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -42,16 +40,12 @@ class ProjectPaths:
         return self.root / "catalog.json"
 
     @property
-    def meta_json(self) -> Path:
-        return self.root / "meta.json"
-
-    @property
     def index_json(self) -> Path:
         return self.root / "index.json"
 
     @property
-    def meta_log(self) -> Path:
-        return self.root / "meta.log"
+    def slide_pages_json(self) -> Path:
+        return self.root / "slide_pages.json"
 
     @property
     def vec_text_npz(self) -> Path:
@@ -120,15 +114,13 @@ class ProjectStore:
     def load_index(self) -> Dict[str, Any]:
         data = read_json(self.paths.index_json, {})
         if isinstance(data, dict) and data:
-            data = self._migrate_meta(data)
-            return self._apply_meta_log(data)
-        return self.load_meta()
+            return self._migrate_meta(data)
+        return {"schema_version": SCHEMA_VERSION, "files": {}, "slides": {}}
 
     def save_index(self, data: Dict[str, Any]) -> None:
         data = dict(data)
         data["schema_version"] = SCHEMA_VERSION
         atomic_write_json(self.paths.index_json, data)
-        self.save_meta(data)
 
     # ---------------- App State ----------------
     def load_app_state(self) -> Dict[str, Any]:
@@ -211,42 +203,20 @@ class ProjectStore:
         data["schema_version"] = str(data.get("schema_version", SCHEMA_VERSION))
         return data
 
-    # ---------------- Meta ----------------
-    def load_meta(self) -> Dict[str, Any]:
-        default = {
-            "schema_version": SCHEMA_VERSION,
-            "files": {},
-            "slides": {},
-        }
-        data = read_json(self.paths.meta_json, {})
-        if not isinstance(data, dict) or not data:
-            data = read_json(self.paths.index_json, default)
-        data = self._migrate_meta(data or default)
-        return self._apply_meta_log(data)
+    # ---------------- Slide Pages ----------------
+    def load_slide_pages(self) -> Dict[str, str]:
+        data = read_json(self.paths.slide_pages_json, {})
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, str] = {}
+        for key, value in data.items():
+            if isinstance(key, str):
+                out[key] = "" if value is None else str(value)
+        return out
 
-    def save_meta(self, data: Dict[str, Any]) -> None:
-        data = dict(data)
-        data["schema_version"] = SCHEMA_VERSION
-        atomic_write_json(self.paths.meta_json, data)
-        atomic_write_json(self.paths.index_json, data)
-        if self.paths.meta_log.exists():
-            try:
-                self.paths.meta_log.unlink()
-            except Exception as exc:
-                log.warning("清除 meta.log 失敗：%s", exc)
-
-    def append_meta_log(self, patch: Dict[str, Any]) -> None:
-        payload = {
-            "ts": int(time.time()),
-            "files": patch.get("files", {}),
-            "slides": patch.get("slides", {}),
-        }
-        try:
-            self.paths.meta_log.parent.mkdir(parents=True, exist_ok=True)
-            with self.paths.meta_log.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        except Exception as exc:
-            log.warning("寫入 meta.log 失敗：%s", exc)
+    def save_slide_pages(self, data: Dict[str, str]) -> None:
+        payload = {str(k): "" if v is None else str(v) for k, v in data.items()}
+        atomic_write_json(self.paths.slide_pages_json, payload)
 
     def _migrate_meta(self, data: Any) -> Dict[str, Any]:
         if not isinstance(data, dict):
@@ -256,25 +226,6 @@ class ProjectStore:
         if "slides" not in data or not isinstance(data["slides"], dict):
             data["slides"] = {}
         data["schema_version"] = str(data.get("schema_version", SCHEMA_VERSION))
-        return data
-
-    def _apply_meta_log(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        if not self.paths.meta_log.exists():
-            return data
-        try:
-            for line in self.paths.meta_log.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    patch = json.loads(line)
-                except Exception:
-                    continue
-                files_patch = patch.get("files") if isinstance(patch.get("files"), dict) else {}
-                slides_patch = patch.get("slides") if isinstance(patch.get("slides"), dict) else {}
-                data["files"].update(files_patch)
-                data["slides"].update(slides_patch)
-        except Exception as exc:
-            log.warning("讀取 meta.log 失敗：%s", exc)
         return data
 
     # ---------------- Vectors ----------------
