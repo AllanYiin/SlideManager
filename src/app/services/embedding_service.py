@@ -29,6 +29,10 @@ class EmbeddingConfig:
     image_dim: int = 512
 
 
+class EmbeddingError(RuntimeError):
+    pass
+
+
 class EmbeddingService:
     def __init__(self, api_key: Optional[str], cfg: EmbeddingConfig, *, cache_dir: Optional[Path] = None):
         self.cfg = cfg
@@ -77,13 +81,9 @@ class EmbeddingService:
         if missing_texts and self._client:
             for t, pos in zip(missing_texts, missing_indices):
                 vec = self._fetch_embedding_with_retry(t)
-                if vec:
-                    v = self._align_dim(np.asarray(vec, dtype=np.float32))
-                    out[pos] = normalize_l2(v)
-                    self._cache[self._cache_key(t)] = self._to_cache_list(v)
-
-                else:
-                    out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
+                v = self._align_dim(np.asarray(vec, dtype=np.float32))
+                out[pos] = normalize_l2(v)
+                self._cache[self._cache_key(t)] = self._to_cache_list(v)
             self._save_cache()
 
         for i, t in enumerate(cleaned):
@@ -122,12 +122,14 @@ class EmbeddingService:
     def _fetch_embedding_with_retry(self, text: str) -> List[float]:
 
         if not self._client:
-            return []
+            raise EmbeddingError("OpenAI client unavailable")
         delays = [0.5, 1.0, 2.0]
         for attempt, delay in enumerate(delays, start=1):
             try:
                 vecs = self._client.embed_texts([text], self.cfg.text_model)
-                return vecs[0] if vecs else []
+                if vecs:
+                    return vecs[0]
+                raise EmbeddingError("OpenAI embedding response is empty")
             except Exception as exc:
                 log.warning(
                     "[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s | text_id=%s chars=%s est_tokens=%s | text=%s",
@@ -140,8 +142,8 @@ class EmbeddingService:
                 )
                 if attempt < len(delays):
                     time.sleep(delay)
-        log.error("[OPENAI_ERROR] OpenAI embeddings 最終失敗，改用零向量")
-        return []
+        log.error("[OPENAI_ERROR] OpenAI embeddings 最終失敗，已停止產生向量")
+        raise EmbeddingError("OpenAI embeddings failed after retries")
 
     def _split_text(self, text: str) -> List[str]:
         if not text:
