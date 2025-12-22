@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 from unittest.mock import patch
 
-from requests.cookies import RequestsCookieJar
+try:
+    from requests.cookies import RequestsCookieJar
+except ImportError:
+    RequestsCookieJar = None
 
 # 讓 unittest 在任何工作目錄下都能找到 src/app
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,7 @@ if str(SRC) not in sys.path:
 from app.services import model_assets
 
 
+@unittest.skipUnless(RequestsCookieJar, "requests 尚未安裝")
 class FakeResponse:
     def __init__(
         self,
@@ -39,6 +43,7 @@ class FakeResponse:
             yield chunk
 
 
+@unittest.skipUnless(RequestsCookieJar, "requests 尚未安裝")
 class TestDownloadFromGoogleDrive(unittest.TestCase):
     def test_ensure_rerank_model_calls_download_when_missing(self) -> None:
         response = FakeResponse(
