@@ -72,9 +72,9 @@ class TestCatalogService(unittest.TestCase):
             self.assertEqual(files[0]["slide_count"], 2)
 
             svc.mark_indexed(files[0]["abs_path"], slides_count=2)
-            cat = store.load_catalog()
-            self.assertTrue(cat["files"][0]["indexed"])
-            self.assertEqual(cat["files"][0]["slides_count"], 2)
+            manifest = store.load_manifest()
+            self.assertTrue(manifest["files"][0]["indexed"])
+            self.assertEqual(manifest["files"][0]["slides_count"], 2)
 
 
     def test_mark_missing_and_clear(self):
@@ -98,7 +98,7 @@ class TestCatalogService(unittest.TestCase):
 
             removed = svc.clear_missing_files()
             self.assertEqual(removed, 1)
-            self.assertEqual(store.load_catalog()["files"], [])
+            self.assertEqual(store.load_manifest()["files"], [])
 
 
 if __name__ == "__main__":

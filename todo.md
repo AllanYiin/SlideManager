@@ -2,7 +2,7 @@
 
 - [x] 建立專案骨架（src/app、logs、data、assets）
 - [x] 實作設定與狀態保存（settings.json：上次專案路徑、視窗大小、分頁）
-- [x] 實作 ProjectStore（project.json / catalog.json / index.json；版本欄位、原子寫入、.bak）
+- [x] 實作 ProjectStore（project.json / manifest.json / index.json；版本欄位、原子寫入、.bak）
 - [x] 實作 CatalogService（白名單目錄 CRUD、掃描 .pptx、metadata/hash、索引狀態）
 - [x] 實作 ExtractionService（python-pptx 逐頁抽取 title/body/all_text）
 - [x] 實作 RenderService（LibreOffice 可用則渲染；否則 placeholder 縮圖）
@@ -29,7 +29,7 @@
 ## Tech Spec 待辦（依 spec/tech_spec.md）
 
 - [ ] 1) 專案與資料夾規劃
-  - [ ] 建立/確認專案目錄結構（project.json、catalog.json、index.json、thumbs/、cache/）
+  - [ ] 建立/確認專案目錄結構（project.json、manifest.json、index.json、thumbs/、cache/）
   - [ ] 新增專案版本與遷移策略（schema_version）
 - [ ] 2) 目錄白名單與掃描（CatalogService）
   - [ ] 白名單目錄 CRUD（新增/移除/啟用/停用/遞迴）

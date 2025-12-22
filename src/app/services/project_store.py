@@ -36,10 +36,6 @@ class ProjectPaths:
         return self.root / "manifest.json"
 
     @property
-    def catalog_json(self) -> Path:
-        return self.root / "catalog.json"
-
-    @property
     def index_json(self) -> Path:
         return self.root / "index.json"
 
@@ -100,15 +96,9 @@ class ProjectStore:
         self.save_app_state(data)
 
     def load_catalog(self) -> Dict[str, Any]:
-        data = read_json(self.paths.catalog_json, {})
-        if isinstance(data, dict) and data:
-            return self._migrate_manifest(data)
         return self.load_manifest()
 
     def save_catalog(self, data: Dict[str, Any]) -> None:
-        data = dict(data)
-        data["schema_version"] = SCHEMA_VERSION
-        atomic_write_json(self.paths.catalog_json, data)
         self.save_manifest(data)
 
     def load_index(self) -> Dict[str, Any]:
@@ -183,15 +173,12 @@ class ProjectStore:
             "stats": {},
         }
         data = read_json(self.paths.manifest_json, {})
-        if not isinstance(data, dict) or not data:
-            data = read_json(self.paths.catalog_json, default)
         return self._migrate_manifest(data or default)
 
     def save_manifest(self, data: Dict[str, Any]) -> None:
         data = dict(data)
         data["schema_version"] = SCHEMA_VERSION
         atomic_write_json(self.paths.manifest_json, data)
-        atomic_write_json(self.paths.catalog_json, data)
 
     def _migrate_manifest(self, data: Any) -> Dict[str, Any]:
         if not isinstance(data, dict):

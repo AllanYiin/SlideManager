@@ -21,8 +21,8 @@ class TestProjectStore(unittest.TestCase):
             s = ProjectStore(root)
             proj = s.load_project()
             self.assertIn("whitelist_dirs", proj)
-            cat = s.load_catalog()
-            self.assertIn("files", cat)
+            manifest = s.load_manifest()
+            self.assertIn("files", manifest)
             idx = s.load_index()
             self.assertIn("slides", idx)
 

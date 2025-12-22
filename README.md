@@ -34,7 +34,7 @@
 ## 專案資料夾會產生哪些檔案
 
 - `project.json`：白名單資料夾等專案設定
-- `catalog.json`：掃描到的 .pptx 清單與 metadata
+- `manifest.json`：掃描到的 .pptx 清單與 metadata
 - `index.json`：投影片級索引（文字、向量、縮圖路徑）
 - `thumbs/`：縮圖輸出（需有可用 renderer）
 - `cache/`：快取（可放 `image_embedder.onnx` 以啟用 ONNX 圖片向量）
