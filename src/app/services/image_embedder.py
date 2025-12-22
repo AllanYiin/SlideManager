@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 from typing import List, Optional
@@ -32,16 +34,24 @@ class ImageEmbedder:
             raise FileNotFoundError("找不到 ONNX 模型：未指定模型路徑")
         if not model_path.exists():
             raise FileNotFoundError(f"找不到 ONNX 模型: {model_path}")
+        if importlib.util.find_spec("numpy.core") is None:
+            raise RuntimeError("numpy 安裝不完整或版本過舊，請升級 numpy 至最新版後再啟動圖片模型")
         try:
-            import onnxruntime as ort
+            numpy_version = version("numpy")
+            log.info("ImageEmbedder：偵測到 numpy 版本 %s", numpy_version)
+        except PackageNotFoundError:
+            numpy_version = "unknown"
+            log.warning("ImageEmbedder：無法取得 numpy 版本資訊")
+        if importlib.util.find_spec("onnxruntime") is None:
+            raise RuntimeError("onnxruntime 未安裝，請安裝對應版本後再啟動圖片模型")
 
+        import onnxruntime as ort
+
+        try:
             self._ort_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
             self.input_name = self._ort_session.get_inputs()[0].name
             self.output_name = self._ort_session.get_outputs()[0].name
             log.info("ImageEmbedder：已載入 ONNX 模型：%s", model_path)
-        except ImportError as exc:
-            log.exception("[ONNX_ERROR] onnxruntime 載入失敗 (%s): %s", model_path, exc)
-            raise RuntimeError("onnxruntime 無法載入，請確認已安裝對應版本與系統依賴") from exc
         except Exception as exc:
             log.exception("[ONNX_ERROR] 載入 ONNX 模型失敗 (%s): %s", model_path, exc)
             raise RuntimeError("載入圖片模型失敗，檔案可能損毀，請重新下載 rerankTexure.onnx") from exc
