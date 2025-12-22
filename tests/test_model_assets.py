@@ -4,8 +4,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Iterable, List, Optional
 from unittest.mock import patch
+
+try:
+    from requests.cookies import RequestsCookieJar
+except ImportError:
+    RequestsCookieJar = None
 
 # 讓 unittest 在任何工作目錄下都能找到 src/app
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,19 +21,20 @@ if str(SRC) not in sys.path:
 from app.services import model_assets
 
 
+@unittest.skipUnless(RequestsCookieJar, "requests 尚未安裝")
 class FakeResponse:
     def __init__(
         self,
         *,
         status_code: int = 200,
         headers: Optional[dict] = None,
-        cookies: Optional[Dict[str, str]] = None,
+        cookies: Optional[RequestsCookieJar] = None,
         text: str = "",
         content_chunks: Optional[Iterable[bytes]] = None,
     ) -> None:
         self.status_code = status_code
         self.headers = headers or {}
-        self.cookies = cookies or {}
+        self.cookies = cookies or RequestsCookieJar()
         self.text = text
         self._content_chunks = list(content_chunks or [])
 
@@ -37,6 +43,7 @@ class FakeResponse:
             yield chunk
 
 
+@unittest.skipUnless(RequestsCookieJar, "requests 尚未安裝")
 class TestDownloadFromGoogleDrive(unittest.TestCase):
     def test_ensure_rerank_model_calls_download_when_missing(self) -> None:
         response = FakeResponse(
@@ -74,7 +81,8 @@ class TestDownloadFromGoogleDrive(unittest.TestCase):
         self.assertTrue(any(p.stage == "download" for p in progress))
 
     def test_downloads_after_confirm_token(self) -> None:
-        cookies = {"download_warning_123": "token123"}
+        cookies = RequestsCookieJar()
+        cookies.set("download_warning_123", "token123")
         first_response = FakeResponse(
             headers={"Content-Type": "text/html"},
             cookies=cookies,

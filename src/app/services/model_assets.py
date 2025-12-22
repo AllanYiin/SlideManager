@@ -4,87 +4,12 @@
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-if importlib.util.find_spec("requests") is not None:
-    import requests
-else:
-    from http import cookiejar as _cookiejar
-    from urllib import error as _url_error
-    from urllib import parse as _url_parse
-    from urllib import request as _url_request
-
-    class RequestException(Exception):
-        """requests 相容錯誤類型。"""
-
-    class _CookieView:
-        def __init__(self, jar: _cookiejar.CookieJar) -> None:
-            self._jar = jar
-
-        def items(self) -> list[tuple[str, str]]:
-            return [(cookie.name, cookie.value) for cookie in self._jar]
-
-    class Response:
-        def __init__(
-            self,
-            *,
-            status_code: int,
-            headers: dict,
-            content: bytes,
-            cookies: _cookiejar.CookieJar,
-        ) -> None:
-            self.status_code = status_code
-            self.headers = headers
-            self.cookies = _CookieView(cookies)
-            self.text = content.decode("utf-8", errors="replace")
-            self._content = content
-
-        def iter_content(self, chunk_size: int = 1024) -> list[bytes]:
-            return [self._content[i : i + chunk_size] for i in range(0, len(self._content), chunk_size)]
-
-    class Session:
-        def __init__(self) -> None:
-            self._cookie_jar = _cookiejar.CookieJar()
-            self._opener = _url_request.build_opener(_url_request.HTTPCookieProcessor(self._cookie_jar))
-
-        def get(
-            self,
-            url: str,
-            *,
-            params: Optional[dict] = None,
-            stream: bool = True,
-            timeout: int = 30,
-        ) -> Response:
-            del stream
-            if params:
-                query = _url_parse.urlencode(params)
-                connector = "&" if _url_parse.urlparse(url).query else "?"
-                url = f"{url}{connector}{query}"
-            request = _url_request.Request(url, method="GET")
-            try:
-                with self._opener.open(request, timeout=timeout) as response:
-                    content = response.read()
-                    headers = dict(response.headers.items())
-                    status_code = response.getcode()
-            except _url_error.URLError as exc:
-                raise RequestException(str(exc)) from exc
-            return Response(
-                status_code=status_code,
-                headers=headers,
-                content=content,
-                cookies=self._cookie_jar,
-            )
-
-    class _RequestsShim:
-        RequestException = RequestException
-        Response = Response
-        Session = Session
-
-    requests = _RequestsShim()
+import requests
 
 from app.core.logging import get_logger
 
