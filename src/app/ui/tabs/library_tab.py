@@ -70,6 +70,16 @@ class LibraryTab(QWidget):
         self._metrics_timer.setInterval(10000)
 
         self._metrics_timer.timeout.connect(self._flush_metrics_refresh)
+        self._indexing_active = False
+        self._cached_text_vectors: Dict[str, Any] = {}
+        self._cached_image_vectors: Dict[str, Any] = {}
+        self._vectors_loaded = False
+        self._vector_mtimes = {
+            "text": None,
+            "text_delta": None,
+            "image": None,
+            "image_delta": None,
+        }
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -342,8 +352,7 @@ class LibraryTab(QWidget):
             return
         cat = self.ctx.store.load_manifest()
         slide_pages = self.ctx.store.load_slide_pages()
-        text_vectors = self.ctx.store.load_text_vectors()
-        image_vectors = self.ctx.store.load_image_vectors()
+        text_vectors, image_vectors = self._load_vectors_cached()
         slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
         for slide_id, text in slide_pages.items():
             if not isinstance(slide_id, str):
@@ -377,6 +386,25 @@ class LibraryTab(QWidget):
         self._slides_by_file_id = slides_by_file_id
         files = [e for e in cat.get("files", []) if isinstance(e, dict)]
         self._refresh_table_with_files(files)
+
+    def _load_vectors_cached(self, *, force: bool = False) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        if not self.ctx:
+            return {}, {}
+        paths = self.ctx.store.paths
+        current_mtimes = {
+            "text": paths.vec_text_npz.stat().st_mtime if paths.vec_text_npz.exists() else None,
+            "text_delta": paths.vec_text_delta_npz.stat().st_mtime if paths.vec_text_delta_npz.exists() else None,
+            "image": paths.vec_image_npz.stat().st_mtime if paths.vec_image_npz.exists() else None,
+            "image_delta": paths.vec_image_delta_npz.stat().st_mtime if paths.vec_image_delta_npz.exists() else None,
+        }
+        changed = current_mtimes != self._vector_mtimes
+        should_reload = force or not self._vectors_loaded
+        if not self._indexing_active and (changed or should_reload):
+            self._cached_text_vectors = self.ctx.store.load_text_vectors()
+            self._cached_image_vectors = self.ctx.store.load_image_vectors()
+            self._vector_mtimes = current_mtimes
+            self._vectors_loaded = True
+        return self._cached_text_vectors, self._cached_image_vectors
 
     def _refresh_table_with_files(self, files: List[Dict[str, Any]]) -> None:
         if not hasattr(self, "_slides_by_file_id"):
@@ -825,6 +853,7 @@ class LibraryTab(QWidget):
 
         self._cancel_index = False
         self._pause_index = False
+        self._indexing_active = True
         self.btn_cancel.setEnabled(True)
         self.btn_pause.setEnabled(True)
         self.btn_pause.setText("暫停")
@@ -908,11 +937,13 @@ class LibraryTab(QWidget):
             self.prog_label.setText("索引中...")
 
     def _on_index_done(self, result: object) -> None:
+        self._indexing_active = False
         self.btn_cancel.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("暫停")
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
+        self._load_vectors_cached(force=True)
         self.refresh_table()
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):
@@ -931,6 +962,7 @@ class LibraryTab(QWidget):
 
     def _on_error(self, tb: str) -> None:
         log.error("背景任務錯誤\n%s", tb)
+        self._indexing_active = False
         if hasattr(self.main_window, "show_toast"):
             self.main_window.show_toast("背景任務發生錯誤，已寫入 logs/app.log。", level="error", timeout_ms=12000)
         box = QMessageBox(self)
