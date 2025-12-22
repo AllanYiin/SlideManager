@@ -206,6 +206,7 @@ class IndexService:
                 if cancel_flag and cancel_flag():
                     return False
                 if not paused_notified:
+                    flush_pending_slides(save_snapshot=True)
                     progress("pause", cur, total, "已暫停，等待續跑...")
                     paused_notified = True
                 time.sleep(0.2)
@@ -214,6 +215,22 @@ class IndexService:
         meta = self.store.load_meta()
         meta_files = meta.get("files", {}) if isinstance(meta.get("files"), dict) else {}
         meta_slides = meta.get("slides", {}) if isinstance(meta.get("slides"), dict) else {}
+
+        pending_slide_patch: Dict[str, Any] = {}
+        slide_updates_total = 0
+
+        def flush_pending_slides(*, save_snapshot: bool = False) -> None:
+            nonlocal pending_slide_patch
+            if pending_slide_patch:
+                self.store.append_meta_log({"slides": pending_slide_patch})
+                pending_slide_patch = {}
+            if save_snapshot:
+                try:
+                    meta["files"] = meta_files
+                    meta["slides"] = meta_slides
+                    self.store.save_meta(meta)
+                except Exception as exc:
+                    log.warning("暫停時保存索引狀態失敗：%s", exc)
 
         def slide_meta_by_no(file_id: str) -> Dict[int, Dict[str, Any]]:
             out: Dict[int, Dict[str, Any]] = {}
@@ -726,8 +743,19 @@ class IndexService:
                 )
                 meta_slides[slide_id] = prev
                 slides_patch[slide_id] = prev
+                pending_slide_patch[slide_id] = prev
+                slide_updates_total += 1
+                if slide_updates_total % 100 == 0:
+                    flush_pending_slides()
+                    progress(
+                        "slide_batch",
+                        total_files + stage2_units + fi,
+                        overall_total,
+                        f"頁面狀態已更新 {slide_updates_total} 頁",
+                    )
 
-            self.store.append_meta_log({"files": {file_id: file_entry}, "slides": slides_patch})
+            flush_pending_slides()
+            self.store.append_meta_log({"files": {file_id: file_entry}})
             self.catalog.mark_indexed(
                 fd.abs_path,
                 slides_count=fd.slide_count,
