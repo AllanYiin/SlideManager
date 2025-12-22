@@ -13,3 +13,4 @@ pywin32
 python-pptx
 rank-bm25
 requests
+tiktoken
