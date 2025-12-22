@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import time
+import importlib.util
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -16,6 +18,8 @@ from app.services.openai_client import OpenAIClient
 from app.utils.vectors import normalize_l2
 
 log = get_logger(__name__)
+
+_TIKTOKEN_AVAILABLE = importlib.util.find_spec("tiktoken") is not None
 
 
 @dataclass
@@ -33,6 +37,7 @@ class EmbeddingService:
         self.cache_dir = cache_dir
         self._cache: Dict[str, List[float]] = {}
         self._cache_path = None
+        self._max_chars = int(os.getenv("OPENAI_EMBED_MAX_CHARS", "200000") or 200000)
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
             self._cache_path = cache_dir / "text_embedding_cache.json"
@@ -116,17 +121,82 @@ class EmbeddingService:
     def _fetch_embedding_with_retry(self, text: str) -> List[float]:
         if not self._client:
             return []
+        chunks = self._split_text(text)
+        if not chunks:
+            return []
+        if len(chunks) == 1:
+            return self._fetch_embedding_single_with_retry(chunks[0])
+        log.warning(
+            "文字過長，將拆分為 %s 段進行 embeddings（OPENAI_EMBED_MAX_CHARS=%s）",
+            len(chunks),
+            self._max_chars,
+        )
+        vectors: List[np.ndarray] = []
+        for chunk in chunks:
+            vec = self._fetch_embedding_single_with_retry(chunk)
+            if not vec:
+                return []
+            vectors.append(np.asarray(vec, dtype=np.float32))
+        stacked = np.stack(vectors, axis=0)
+        averaged = np.mean(stacked, axis=0)
+        return list(averaged)
+
+    def _fetch_embedding_single_with_retry(self, text: str) -> List[float]:
+        if not self._client:
+            return []
         delays = [0.5, 1.0, 2.0]
         for attempt, delay in enumerate(delays, start=1):
             try:
                 vecs = self._client.embed_texts([text], self.cfg.text_model)
                 return vecs[0] if vecs else []
             except Exception as exc:
-                log.warning("[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s", attempt, exc)
+                log.warning(
+                    "[OPENAI_ERROR] OpenAI embeddings 失敗（第 %s 次）：%s | text_id=%s chars=%s est_tokens=%s | text=%s",
+                    attempt,
+                    exc,
+                    self._cache_key(text),
+                    len(text),
+                    self._estimate_tokens(text),
+                    text,
+                )
                 if attempt < len(delays):
                     time.sleep(delay)
         log.error("[OPENAI_ERROR] OpenAI embeddings 最終失敗，改用零向量")
         return []
+
+    def _split_text(self, text: str) -> List[str]:
+        if not text:
+            return []
+        max_chars = max(int(self._max_chars), 0)
+        if max_chars <= 0 or len(text) <= max_chars:
+            return [text]
+        chunks: List[str] = []
+        start = 0
+        while start < len(text):
+            end = min(start + max_chars, len(text))
+            if end < len(text):
+                split_at = text.rfind("\n", start, end)
+                if split_at == -1:
+                    split_at = text.rfind(" ", start, end)
+                if split_at > start + int(max_chars * 0.5):
+                    end = split_at
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            start = end
+        return chunks
+
+    def _estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        if not _TIKTOKEN_AVAILABLE:
+            return max(1, int(len(text) / 4))
+        import tiktoken
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception:
+            return max(1, int(len(text) / 4))
 
     def _align_dim(self, v: np.ndarray) -> np.ndarray:
         if v.size != self.cfg.text_dim:
