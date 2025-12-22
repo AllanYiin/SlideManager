@@ -80,6 +80,10 @@ class LibraryTab(QWidget):
             "image": None,
             "image_delta": None,
         }
+        self._table_refresh_inflight = False
+        self._cached_files: List[Dict[str, Any]] = []
+        self._index_status_payload: Dict[str, Any] = {}
+        self._index_action_inflight = False
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -194,9 +198,9 @@ class LibraryTab(QWidget):
         self.btn_clear_missing.clicked.connect(self.clear_missing_files)
         self.btn_pause.clicked.connect(self.toggle_pause_indexing)
         self.btn_cancel.clicked.connect(self.cancel_indexing)
-        self.filter_edit.textChanged.connect(self.refresh_table)
-        self.status_filter.currentIndexChanged.connect(self.refresh_table)
-        self.coverage_filter.currentIndexChanged.connect(self.refresh_table)
+        self.filter_edit.textChanged.connect(self.refresh_table_view)
+        self.status_filter.currentIndexChanged.connect(self.refresh_table_view)
+        self.coverage_filter.currentIndexChanged.connect(self.refresh_table_view)
 
     def set_context(self, ctx) -> None:
         self.ctx = ctx
@@ -350,61 +354,116 @@ class LibraryTab(QWidget):
         if not self.ctx:
             self.table.setRowCount(0)
             return
-        cat = self.ctx.store.load_manifest()
-        slide_pages = self.ctx.store.load_slide_pages()
-        text_vectors, image_vectors = self._load_vectors_cached()
-        slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
-        for slide_id, text in slide_pages.items():
-            if not isinstance(slide_id, str):
-                continue
-            if "#" not in slide_id:
-                continue
-            file_id, page_raw = slide_id.split("#", 1)
+        if self._table_refresh_inflight:
+            self._pending_table_refresh = True
+            return
+        self._table_refresh_inflight = True
+        ctx = self.ctx
+        cached_text_vectors = self._cached_text_vectors
+        cached_image_vectors = self._cached_image_vectors
+        vectors_loaded = self._vectors_loaded
+        vector_mtimes = dict(self._vector_mtimes)
+
+        def task():
+            import traceback
+
             try:
-                page_no = int(page_raw)
-            except Exception:
-                continue
-            thumb_path = self.ctx.store.paths.thumbs_dir / file_id / f"{page_no}.png"
-            has_image = thumb_path.exists()
-            text_value = "" if text is None else str(text)
-            flags = {
-                "has_text": bool(text_value.strip()),
-                "has_bm25": bool(text_value.strip()),
-                "has_text_vec": slide_id in text_vectors,
-                "has_image": has_image,
-                "has_image_vec": slide_id in image_vectors,
-            }
-            slide_entry = {
-                "slide_id": slide_id,
-                "file_id": file_id,
-                "slide_no": page_no,
-                "thumbnail_path": str(thumb_path) if has_image else None,
-                "flags": flags,
-            }
-            slides_by_file_id.setdefault(file_id, []).append(slide_entry)
-        self._meta_files = {}
-        self._slides_by_file_id = slides_by_file_id
-        files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+                cat = ctx.store.load_manifest()
+                slide_pages = ctx.store.load_slide_pages()
+                paths = ctx.store.paths
+                current_mtimes = {
+                    "text": paths.vec_text_npz.stat().st_mtime if paths.vec_text_npz.exists() else None,
+                    "text_delta": paths.vec_text_delta_npz.stat().st_mtime if paths.vec_text_delta_npz.exists() else None,
+                    "image": paths.vec_image_npz.stat().st_mtime if paths.vec_image_npz.exists() else None,
+                    "image_delta": paths.vec_image_delta_npz.stat().st_mtime if paths.vec_image_delta_npz.exists() else None,
+                }
+                if not vectors_loaded or current_mtimes != vector_mtimes:
+                    text_vectors = ctx.store.load_text_vectors()
+                    image_vectors = ctx.store.load_image_vectors()
+                else:
+                    text_vectors = cached_text_vectors
+                    image_vectors = cached_image_vectors
+                slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
+                for slide_id, text in slide_pages.items():
+                    if not isinstance(slide_id, str):
+                        continue
+                    if "#" not in slide_id:
+                        continue
+                    file_id, page_raw = slide_id.split("#", 1)
+                    try:
+                        page_no = int(page_raw)
+                    except Exception:
+                        continue
+                    thumb_path = ctx.store.paths.thumbs_dir / file_id / f"{page_no}.png"
+                    has_image = thumb_path.exists()
+                    text_value = "" if text is None else str(text)
+                    flags = {
+                        "has_text": bool(text_value.strip()),
+                        "has_bm25": bool(text_value.strip()),
+                        "has_text_vec": slide_id in text_vectors,
+                        "has_image": has_image,
+                        "has_image_vec": slide_id in image_vectors,
+                    }
+                    slide_entry = {
+                        "slide_id": slide_id,
+                        "file_id": file_id,
+                        "slide_no": page_no,
+                        "thumbnail_path": str(thumb_path) if has_image else None,
+                        "flags": flags,
+                    }
+                    slides_by_file_id.setdefault(file_id, []).append(slide_entry)
+                files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+                return {
+                    "ok": True,
+                    "files": files,
+                    "slides_by_file_id": slides_by_file_id,
+                    "text_vectors": text_vectors,
+                    "image_vectors": image_vectors,
+                    "vector_mtimes": current_mtimes,
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"載入檔案清單失敗：{exc}",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_refresh_table_done)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def refresh_table_view(self) -> None:
+        if not self.ctx:
+            self.table.setRowCount(0)
+            return
+        files = self._cached_files
+        if not files:
+            self.table.setRowCount(0)
+            return
         self._refresh_table_with_files(files)
 
-    def _load_vectors_cached(self, *, force: bool = False) -> tuple[Dict[str, Any], Dict[str, Any]]:
-        if not self.ctx:
-            return {}, {}
-        paths = self.ctx.store.paths
-        current_mtimes = {
-            "text": paths.vec_text_npz.stat().st_mtime if paths.vec_text_npz.exists() else None,
-            "text_delta": paths.vec_text_delta_npz.stat().st_mtime if paths.vec_text_delta_npz.exists() else None,
-            "image": paths.vec_image_npz.stat().st_mtime if paths.vec_image_npz.exists() else None,
-            "image_delta": paths.vec_image_delta_npz.stat().st_mtime if paths.vec_image_delta_npz.exists() else None,
-        }
-        changed = current_mtimes != self._vector_mtimes
-        should_reload = force or not self._vectors_loaded
-        if not self._indexing_active and (changed or should_reload):
-            self._cached_text_vectors = self.ctx.store.load_text_vectors()
-            self._cached_image_vectors = self.ctx.store.load_image_vectors()
-            self._vector_mtimes = current_mtimes
-            self._vectors_loaded = True
-        return self._cached_text_vectors, self._cached_image_vectors
+    def _on_refresh_table_done(self, payload: object) -> None:
+        self._table_refresh_inflight = False
+        if not isinstance(payload, dict):
+            log.error("表格資料回傳格式不正確：%s", payload)
+            return
+        if not payload.get("ok"):
+            log.error("載入檔案清單失敗\n%s", payload.get("traceback", ""))
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast("載入檔案清單失敗，已寫入 logs/app.log。", level="error")
+            return
+        self._cached_text_vectors = payload.get("text_vectors", {})
+        self._cached_image_vectors = payload.get("image_vectors", {})
+        self._vector_mtimes = payload.get("vector_mtimes", self._vector_mtimes)
+        self._vectors_loaded = True
+        self._slides_by_file_id = payload.get("slides_by_file_id", {})
+        files = payload.get("files", [])
+        self._cached_files = files if isinstance(files, list) else []
+        self._refresh_table_with_files(self._cached_files)
+        if self._pending_table_refresh:
+            self._pending_table_refresh = False
+            self.refresh_table()
 
     def _refresh_table_with_files(self, files: List[Dict[str, Any]]) -> None:
         if not hasattr(self, "_slides_by_file_id"):
@@ -517,12 +576,12 @@ class LibraryTab(QWidget):
     def apply_status_filter(self, status: str | None) -> None:
         idx = self.status_filter.findData(status)
         self.status_filter.setCurrentIndex(idx if idx != -1 else 0)
-        self.refresh_table()
+        self.refresh_table_view()
 
     def apply_coverage_filter(self, coverage: str | None) -> None:
         idx = self.coverage_filter.findData(coverage)
         self.coverage_filter.setCurrentIndex(idx if idx != -1 else 0)
-        self.refresh_table()
+        self.refresh_table_view()
 
     def selected_files(self) -> List[Dict[str, Any]]:
         if not self.ctx:
@@ -540,45 +599,50 @@ class LibraryTab(QWidget):
 
     # ---------- indexing ----------
     def _choose_index_mode(self, files: List[Dict[str, Any]]) -> tuple[bool, bool] | None:
-        while True:
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Question)
-            box.setWindowTitle("選擇索引類型")
-            box.setText("請選擇要更新的索引類型：")
+        details = self._index_status_payload.get("details", "")
+        detail_long = self._index_status_payload.get("detail_long", "")
+        legacy_needed = bool(self._index_status_payload.get("legacy_needed"))
+        fill_needed = bool(self._index_status_payload.get("fill_needed"))
 
-            details, detail_long, legacy_needed, fill_needed = self._build_index_status_details(files)
-            if details:
-                box.setInformativeText(details)
-            if detail_long:
-                box.setDetailedText(detail_long)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("選擇索引類型")
+        box.setText("請選擇要更新的索引類型：")
 
-            btn_full = box.addButton("完整索引（文字 + 圖像）", QMessageBox.AcceptRole)
-            btn_text = box.addButton("只更新文字索引", QMessageBox.AcceptRole)
-            btn_image = box.addButton("只更新圖像索引", QMessageBox.AcceptRole)
-            btn_migrate = None
-            btn_fill = None
-            if legacy_needed:
-                btn_migrate = box.addButton("轉換舊版資料", QMessageBox.ActionRole)
-            if fill_needed:
-                btn_fill = box.addButton("補齊索引更新時間", QMessageBox.ActionRole)
-            btn_cancel = box.addButton(QMessageBox.Cancel)
-            box.setDefaultButton(btn_full)
-            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked == btn_cancel:
-                return None
-            if btn_migrate and clicked == btn_migrate:
-                self._migrate_legacy_files()
-                continue
-            if btn_fill and clicked == btn_fill:
-                self._fill_missing_index_timestamps()
-                continue
-            if clicked == btn_text:
-                return True, False
-            if clicked == btn_image:
-                return False, True
-            return True, True
+        if details:
+            box.setInformativeText(details)
+        if detail_long:
+            box.setDetailedText(detail_long)
+
+        btn_full = box.addButton("完整索引（文字 + 圖像）", QMessageBox.AcceptRole)
+        btn_text = box.addButton("只更新文字索引", QMessageBox.AcceptRole)
+        btn_image = box.addButton("只更新圖像索引", QMessageBox.AcceptRole)
+        btn_migrate = None
+        btn_fill = None
+        if legacy_needed:
+            btn_migrate = box.addButton("轉換舊版資料", QMessageBox.ActionRole)
+        if fill_needed:
+            btn_fill = box.addButton("補齊索引更新時間", QMessageBox.ActionRole)
+        btn_cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(btn_full)
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_cancel:
+            return None
+        if btn_migrate and clicked == btn_migrate:
+            self._index_action_inflight = True
+            self._run_migrate_legacy_files(files)
+            return None
+        if btn_fill and clicked == btn_fill:
+            self._index_action_inflight = True
+            self._run_fill_missing_index_timestamps(files)
+            return None
+        if clicked == btn_text:
+            return True, False
+        if clicked == btn_image:
+            return False, True
+        return True, True
 
     def start_index_needed(self) -> None:
         if not self.ctx:
@@ -638,13 +702,7 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
             return
-        mode = self._choose_index_mode(files)
-        if not mode:
-            self._reset_prepare_ui()
-            return
-        update_text, update_image = mode
-        self._set_last_action("開始索引（需要者）", lambda: self._start_index(files, update_text, update_image))
-        self._start_index(files, update_text, update_image)
+        self._request_index_mode(files)
 
     def _prepare_index_selected(self, selected_paths: List[str]) -> None:
         if not self.ctx:
@@ -672,144 +730,222 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
+        self._request_index_mode(files)
+
+    def _request_index_mode(self, files: List[Dict[str, Any]]) -> None:
+        if not self.ctx:
+            return
+        self._set_prepare_ui("正在整理索引狀態...")
+        ctx = self.ctx
+
+        def task():
+            import traceback
+
+            try:
+                store = ctx.store
+                paths = store.paths
+                manifest = store.load_manifest()
+                slide_pages = store.load_slide_pages()
+
+                total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
+                scope_files = len(files)
+                indexed_files = sum(
+                    1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
+                )
+
+                thumbs_count = 0
+                try:
+                    if paths.thumbs_dir.exists():
+                        thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
+                except Exception as exc:
+                    log.warning("讀取縮圖快取數量失敗：%s", exc)
+
+                def fmt_time(ts: int | None) -> str:
+                    if not ts:
+                        return "未設定"
+                    try:
+                        return datetime.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        return "時間格式錯誤"
+
+                def file_info(path: Path) -> str:
+                    if not path.exists():
+                        return "不存在"
+                    try:
+                        mtime = int(path.stat().st_mtime)
+                        size = path.stat().st_size
+                        return f"存在（{fmt_time(mtime)} | {size:,} bytes）"
+                    except Exception:
+                        return "存在（無法讀取時間/大小）"
+
+                legacy_needed = False
+                legacy_lines = []
+                legacy_candidates = [
+                    ("project.json", paths.project_json, paths.app_state_json),
+                    ("index.json", paths.index_json, paths.slide_pages_json),
+                ]
+                for legacy_name, legacy_path, new_path in legacy_candidates:
+                    if legacy_path.exists() and not new_path.exists():
+                        legacy_needed = True
+                        legacy_lines.append(f"- {legacy_name} 存在，但 {new_path.name} 缺失")
+
+                fill_needed = False
+
+                details = (
+                    f"本次範圍：{scope_files} 個檔案\n"
+                    f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
+                    f"投影片文字（slide_pages.json）：{len(slide_pages)}\n"
+                    f"縮圖快取：{thumbs_count} 張\n"
+                    "索引時間：以 manifest.json 的 indexed_at 為準"
+                )
+
+                detail_long_lines = [
+                    "=== 檔案存在狀態 ===",
+                    f"- app_state.json：{file_info(paths.app_state_json)}",
+                    f"- project.json：{file_info(paths.project_json)}",
+                    f"- manifest.json：{file_info(paths.manifest_json)}",
+                    f"- slide_pages.json：{file_info(paths.slide_pages_json)}",
+                    f"- index.json：{file_info(paths.index_json)}",
+                    "",
+                    "=== 索引時間概況 ===",
+                    "- 目前僅追蹤 manifest.json 的 indexed_at",
+                ]
+                if legacy_lines:
+                    detail_long_lines.append("")
+                    detail_long_lines.append("=== 舊版資料檢測 ===")
+                    detail_long_lines.extend(legacy_lines)
+
+                return {
+                    "ok": True,
+                    "details": details,
+                    "detail_long": "\n".join(detail_long_lines),
+                    "legacy_needed": legacy_needed,
+                    "fill_needed": fill_needed,
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"整理索引狀態失敗：{exc}",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(lambda payload: self._on_index_status_ready(files, payload))
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_index_status_ready(self, files: List[Dict[str, Any]], payload: object) -> None:
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            log.error("整理索引狀態失敗\n%s", payload if isinstance(payload, dict) else payload)
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast("整理索引狀態失敗，已寫入 logs/app.log。", level="error")
+            self._reset_prepare_ui()
+            return
+        self._index_status_payload = payload
         mode = self._choose_index_mode(files)
         if not mode:
+            if self._index_action_inflight:
+                self._index_action_inflight = False
+                return
             self._reset_prepare_ui()
             return
         update_text, update_image = mode
-        self._set_last_action("開始索引（選取檔案）", lambda: self._start_index(files, update_text, update_image))
+        self._set_last_action("開始索引", lambda: self._start_index(files, update_text, update_image))
         self._start_index(files, update_text, update_image)
 
-    def _build_index_status_details(
-        self, files: List[Dict[str, Any]]
-    ) -> tuple[str, str, bool, bool]:
-        if not self.ctx:
-            return "", "", False, False
-        store = self.ctx.store
-        paths = store.paths
-        manifest = store.load_manifest()
-        slide_pages = store.load_slide_pages()
-
-        total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
-        scope_files = len(files)
-        indexed_files = sum(1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed"))
-
-        thumbs_count = 0
-        try:
-            if paths.thumbs_dir.exists():
-                thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
-        except Exception as exc:
-            log.warning("讀取縮圖快取數量失敗：%s", exc)
-
-        def fmt_time(ts: int | None) -> str:
-            if not ts:
-                return "未設定"
-            try:
-                return datetime.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                return "時間格式錯誤"
-
-        def file_info(path: Path) -> str:
-            if not path.exists():
-                return "不存在"
-            try:
-                mtime = int(path.stat().st_mtime)
-                size = path.stat().st_size
-                return f"存在（{fmt_time(mtime)} | {size:,} bytes）"
-            except Exception:
-                return "存在（無法讀取時間/大小）"
-
-        legacy_needed = False
-        legacy_lines = []
-        legacy_candidates = [
-            ("project.json", paths.project_json, paths.app_state_json),
-            ("index.json", paths.index_json, paths.slide_pages_json),
-        ]
-        for legacy_name, legacy_path, new_path in legacy_candidates:
-            if legacy_path.exists() and not new_path.exists():
-                legacy_needed = True
-                legacy_lines.append(f"- {legacy_name} 存在，但 {new_path.name} 缺失")
-
-        fill_needed = False
-
-        details = (
-            f"本次範圍：{scope_files} 個檔案\n"
-            f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
-            f"投影片文字（slide_pages.json）：{len(slide_pages)}\n"
-            f"縮圖快取：{thumbs_count} 張\n"
-            "索引時間：以 manifest.json 的 indexed_at 為準"
-        )
-
-        detail_long_lines = [
-            "=== 檔案存在狀態 ===",
-            f"- app_state.json：{file_info(paths.app_state_json)}",
-            f"- project.json：{file_info(paths.project_json)}",
-            f"- manifest.json：{file_info(paths.manifest_json)}",
-            f"- slide_pages.json：{file_info(paths.slide_pages_json)}",
-            f"- index.json：{file_info(paths.index_json)}",
-            "",
-            "=== 索引時間概況 ===",
-            "- 目前僅追蹤 manifest.json 的 indexed_at",
-        ]
-        if legacy_lines:
-            detail_long_lines.append("")
-            detail_long_lines.append("=== 舊版資料檢測 ===")
-            detail_long_lines.extend(legacy_lines)
-
-        return details, "\n".join(detail_long_lines), legacy_needed, fill_needed
-
-    def _migrate_legacy_files(self) -> None:
+    def _run_migrate_legacy_files(self, files: List[Dict[str, Any]]) -> None:
         if not self.ctx:
             return
-        try:
-            store = self.ctx.store
-            app_state = store.load_app_state()
-            store.save_app_state(app_state)
-            manifest = store.load_manifest()
-            store.save_manifest(manifest)
-            legacy_index = store.load_index()
-            legacy_slides = legacy_index.get("slides", {}) if isinstance(legacy_index.get("slides"), dict) else {}
-            slide_pages: Dict[str, str] = {}
-            for slide_id, slide in legacy_slides.items():
-                if not isinstance(slide_id, str) or not isinstance(slide, dict):
-                    continue
-                slide_pages[slide_id] = str(slide.get("text_for_bm25") or "")
-            if slide_pages:
-                store.save_slide_pages(slide_pages)
-            QMessageBox.information(self, "轉換完成", "已完成舊版資料轉換並寫入新版檔案。")
-        except Exception:
-            log.exception("轉換舊版資料失敗")
-            QMessageBox.warning(self, "轉換失敗", "舊版資料轉換失敗，請查看 logs/ 了解詳細原因。")
+        self._set_last_action("轉換舊版資料", lambda: self._run_migrate_legacy_files(files))
+        self._set_prepare_ui("正在轉換舊版資料...")
+        ctx = self.ctx
 
-    def _fill_missing_index_timestamps(self) -> None:
-        if not self.ctx:
-            return
-        store = self.ctx.store
-        try:
-            manifest = store.load_manifest()
-            files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
-            if store.paths.slide_pages_json.exists():
-                source_ts = int(store.paths.slide_pages_json.stat().st_mtime)
-            elif store.paths.index_json.exists():
-                source_ts = int(store.paths.index_json.stat().st_mtime)
-            else:
-                source_ts = int(datetime.datetime.now().timestamp())
-            updated = 0
-            for entry in files:
-                if not entry.get("indexed_at"):
-                    entry["indexed_at"] = source_ts
-                    updated += 1
-            if updated:
-                manifest["files"] = files
+        def task():
+            import traceback
+
+            try:
+                store = ctx.store
+                app_state = store.load_app_state()
+                store.save_app_state(app_state)
+                manifest = store.load_manifest()
                 store.save_manifest(manifest)
-            QMessageBox.information(
-                self,
-                "補齊完成",
-                f"已補齊 {updated} 筆索引更新時間（來源：slide_pages.json 或 index.json 存檔日）。",
-            )
-        except Exception:
-            log.exception("補齊索引更新時間失敗")
+                legacy_index = store.load_index()
+                legacy_slides = legacy_index.get("slides", {}) if isinstance(legacy_index.get("slides"), dict) else {}
+                slide_pages: Dict[str, str] = {}
+                for slide_id, slide in legacy_slides.items():
+                    if not isinstance(slide_id, str) or not isinstance(slide, dict):
+                        continue
+                    slide_pages[slide_id] = str(slide.get("text_for_bm25") or "")
+                if slide_pages:
+                    store.save_slide_pages(slide_pages)
+                return {"ok": True}
+            except Exception:
+                return {"ok": False, "traceback": traceback.format_exc()}
+
+        w = Worker(task)
+        w.signals.finished.connect(lambda payload: self._on_migrate_done(files, payload))
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_migrate_done(self, files: List[Dict[str, Any]], payload: object) -> None:
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            log.error("轉換舊版資料失敗\n%s", payload.get("traceback", "") if isinstance(payload, dict) else payload)
+            QMessageBox.warning(self, "轉換失敗", "舊版資料轉換失敗，請查看 logs/ 了解詳細原因。")
+            self._reset_prepare_ui()
+            return
+        QMessageBox.information(self, "轉換完成", "已完成舊版資料轉換並寫入新版檔案。")
+        self._request_index_mode(files)
+
+    def _run_fill_missing_index_timestamps(self, files: List[Dict[str, Any]]) -> None:
+        if not self.ctx:
+            return
+        self._set_last_action("補齊索引更新時間", lambda: self._run_fill_missing_index_timestamps(files))
+        self._set_prepare_ui("正在補齊索引更新時間...")
+        ctx = self.ctx
+
+        def task():
+            import traceback
+
+            try:
+                store = ctx.store
+                manifest = store.load_manifest()
+                entries = [e for e in manifest.get("files", []) if isinstance(e, dict)]
+                if store.paths.slide_pages_json.exists():
+                    source_ts = int(store.paths.slide_pages_json.stat().st_mtime)
+                elif store.paths.index_json.exists():
+                    source_ts = int(store.paths.index_json.stat().st_mtime)
+                else:
+                    source_ts = int(datetime.datetime.now().timestamp())
+                updated = 0
+                for entry in entries:
+                    if not entry.get("indexed_at"):
+                        entry["indexed_at"] = source_ts
+                        updated += 1
+                if updated:
+                    manifest["files"] = entries
+                    store.save_manifest(manifest)
+                return {"ok": True, "updated": updated}
+            except Exception:
+                return {"ok": False, "traceback": traceback.format_exc()}
+
+        w = Worker(task)
+        w.signals.finished.connect(lambda payload: self._on_fill_done(files, payload))
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
+
+    def _on_fill_done(self, files: List[Dict[str, Any]], payload: object) -> None:
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            log.error("補齊索引更新時間失敗\n%s", payload.get("traceback", "") if isinstance(payload, dict) else payload)
             QMessageBox.warning(self, "補齊失敗", "補齊索引更新時間失敗，請查看 logs/ 了解詳細原因。")
+            self._reset_prepare_ui()
+            return
+        updated = payload.get("updated", 0)
+        QMessageBox.information(
+            self,
+            "補齊完成",
+            f"已補齊 {updated} 筆索引更新時間（來源：slide_pages.json 或 index.json 存檔日）。",
+        )
+        self._request_index_mode(files)
 
 
     def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool) -> None:
@@ -941,7 +1077,9 @@ class LibraryTab(QWidget):
         self.btn_pause.setText("暫停")
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
-        self._load_vectors_cached(force=True)
+        self._vectors_loaded = False
+        self._cached_text_vectors = {}
+        self._cached_image_vectors = {}
         self.refresh_table()
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):

@@ -63,7 +63,11 @@ class OpenAIClient:
             emb = getattr(item, "embedding", None) if item else None
             if emb is None:
                 continue
-            out.append(emb)
+
+            if isinstance(emb, list):
+                out.append(emb)
+            else:
+                out.append(list(emb))
         return out
 
     async def stream_responses(

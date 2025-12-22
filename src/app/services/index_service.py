@@ -119,6 +119,20 @@ class IndexService:
                 needed.append(f)
                 continue
             slide_count = f.get("slide_count")
+            try:
+                slide_total = int(slide_count) if slide_count is not None else 0
+            except Exception:
+                slide_total = 0
+            if slide_total <= 0:
+                slide_total = int(f.get("slides_count") or 0)
+            summary = f.get("last_index_summary") if isinstance(f.get("last_index_summary"), dict) else {}
+            if slide_total > 0 and summary:
+                text_ok = int(summary.get("slides_ok_text") or 0)
+                image_ok = int(summary.get("slides_ok_image") or 0)
+                bm25_ok = int(summary.get("slides_ok_bm25") or 0)
+                if text_ok < slide_total or image_ok < slide_total or bm25_ok < slide_total:
+                    needed.append(f)
+                    continue
             if slide_count is not None:
                 try:
                     slide_total = int(slide_count)
