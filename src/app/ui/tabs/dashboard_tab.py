@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.logging import get_logger
+from app.ui.async_worker import Worker
 from app.ui.metrics import classify_doc_status
 
 log = get_logger(__name__)
@@ -72,6 +73,8 @@ class DashboardTab(QWidget):
         super().__init__()
         self.main_window = main_window
         self.ctx = None
+        self._metrics_inflight = False
+        self._pending_refresh = False
 
         self.setStyleSheet("background: #F8FAFC;")
 
@@ -200,24 +203,76 @@ class DashboardTab(QWidget):
         self.refresh_metrics()
 
     def refresh_metrics(self) -> None:
-        metrics = self._compute_metrics()
-        self._render_metrics(metrics)
-
-    def _compute_metrics(self) -> DashboardMetrics:
         if not self.ctx:
-            return DashboardMetrics()
-        try:
-            catalog = self.ctx.store.load_manifest()
-            files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
-            slide_pages = self.ctx.store.load_slide_pages()
-            text_vectors = self.ctx.store.load_text_vectors()
-            image_vectors = self.ctx.store.load_image_vectors()
-        except Exception as exc:
-            log.error("Dashboard 讀取資料失敗：%s", exc)
+            self._render_metrics(DashboardMetrics())
+            return
+        if self._metrics_inflight:
+            self._pending_refresh = True
+            return
+        self._set_refresh_busy(True)
+        ctx = self.ctx
+
+        def task():
+            import traceback
+
+            try:
+                catalog = ctx.store.load_manifest()
+                files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
+                slide_pages = ctx.store.load_slide_pages()
+                text_vectors = ctx.store.load_text_vectors()
+                image_vectors = ctx.store.load_image_vectors()
+                metrics = self._compute_metrics_from_data(files, slide_pages, text_vectors, image_vectors)
+                return {"ok": True, "metrics": metrics}
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"Dashboard 讀取資料失敗：{exc}",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_refresh_done)
+        w.signals.error.connect(self._on_refresh_error)
+        self.main_window.thread_pool.start(w)
+
+    def _set_refresh_busy(self, busy: bool) -> None:
+        self._metrics_inflight = busy
+        self.btn_refresh.setEnabled(not busy)
+        self.btn_refresh.setText("更新中..." if busy else "重新整理")
+
+    def _on_refresh_done(self, payload: object) -> None:
+        self._set_refresh_busy(False)
+        if not isinstance(payload, dict):
+            log.error("Dashboard 回傳格式不正確：%s", payload)
+            self._render_metrics(DashboardMetrics())
+            return
+        if not payload.get("ok"):
+            log.error("Dashboard 讀取資料失敗\n%s", payload.get("traceback", ""))
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast("Dashboard 讀取資料失敗，已寫入 logs/app.log。", level="error")
-            return DashboardMetrics()
+            self._render_metrics(DashboardMetrics())
+            return
+        metrics = payload.get("metrics")
+        if isinstance(metrics, DashboardMetrics):
+            self._render_metrics(metrics)
+        if self._pending_refresh:
+            self._pending_refresh = False
+            self.refresh_metrics()
 
+    def _on_refresh_error(self, tb: str) -> None:
+        self._set_refresh_busy(False)
+        log.error("Dashboard 背景任務錯誤\n%s", tb)
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast("Dashboard 背景任務錯誤，已寫入 logs/app.log。", level="error")
+        self._render_metrics(DashboardMetrics())
+
+    def _compute_metrics_from_data(
+        self,
+        files: List[Dict[str, Any]],
+        slide_pages: Dict[str, str],
+        text_vectors: Dict[str, Any],
+        image_vectors: Dict[str, Any],
+    ) -> DashboardMetrics:
         slides = []
         for slide_id, text in slide_pages.items():
             if not isinstance(slide_id, str) or "#" not in slide_id:

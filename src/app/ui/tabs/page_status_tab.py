@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.logging import get_logger
+from app.ui.async_worker import Worker
 
 log = get_logger(__name__)
 
@@ -54,6 +55,8 @@ class PageStatusTab(QWidget):
         super().__init__()
         self.main_window = main_window
         self.ctx = None
+        self._refresh_inflight = False
+        self._pending_refresh = False
 
         root = QVBoxLayout(self)
         header_row = QHBoxLayout()
@@ -126,22 +129,82 @@ class PageStatusTab(QWidget):
             self.table.setRowCount(0)
             self._render_metrics(PageMetrics())
             return
-        try:
-            catalog = self.ctx.store.load_manifest()
-            files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
-        except Exception as exc:
-            log.error("讀取頁面狀態失敗：%s", exc)
+        if self._refresh_inflight:
+            self._pending_refresh = True
+            return
+        self._set_refresh_busy(True)
+        ctx = self.ctx
+
+        def task():
+            import traceback
+
+            try:
+                catalog = ctx.store.load_manifest()
+                files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
+                slide_pages = ctx.store.load_slide_pages()
+                text_vectors = ctx.store.load_text_vectors()
+                image_vectors = ctx.store.load_image_vectors()
+                payload = self._build_rows_payload(files, slide_pages, text_vectors, image_vectors)
+                return {"ok": True, **payload}
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"讀取頁面狀態失敗：{exc}",
+                    "traceback": traceback.format_exc(),
+                }
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_refresh_done)
+        w.signals.error.connect(self._on_refresh_error)
+        self.main_window.thread_pool.start(w)
+
+    def _set_refresh_busy(self, busy: bool) -> None:
+        self._refresh_inflight = busy
+        self.btn_refresh.setEnabled(not busy)
+        self.btn_refresh.setText("更新中..." if busy else "重新整理")
+
+    def _on_refresh_done(self, payload: object) -> None:
+        self._set_refresh_busy(False)
+        if not isinstance(payload, dict):
+            log.error("頁面狀態回傳格式不正確：%s", payload)
+            self._cached_rows = []
+            self.table.setRowCount(0)
+            self._render_metrics(PageMetrics())
+            return
+        if not payload.get("ok"):
+            log.error("讀取頁面狀態失敗\n%s", payload.get("traceback", ""))
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast("讀取頁面狀態失敗，已寫入 logs/app.log。", level="error")
             self._cached_rows = []
             self.table.setRowCount(0)
             self._render_metrics(PageMetrics())
             return
+        rows = payload.get("rows", [])
+        metrics = payload.get("metrics", PageMetrics())
+        self._cached_rows = rows if isinstance(rows, list) else []
+        self._render_metrics(metrics if isinstance(metrics, PageMetrics) else PageMetrics())
+        self.refresh_table()
+        if self._pending_refresh:
+            self._pending_refresh = False
+            self.refresh_data()
 
+    def _on_refresh_error(self, tb: str) -> None:
+        self._set_refresh_busy(False)
+        log.error("頁面狀態背景任務錯誤\n%s", tb)
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast("頁面狀態背景任務錯誤，已寫入 logs/app.log。", level="error")
+        self._cached_rows = []
+        self.table.setRowCount(0)
+        self._render_metrics(PageMetrics())
+
+    def _build_rows_payload(
+        self,
+        files: List[Dict[str, Any]],
+        slide_pages: Dict[str, str],
+        text_vectors: Dict[str, Any],
+        image_vectors: Dict[str, Any],
+    ) -> Dict[str, Any]:
         file_map = {f.get("file_id"): f for f in files if f.get("file_id")}
-        slide_pages = self.ctx.store.load_slide_pages()
-        text_vectors = self.ctx.store.load_text_vectors()
-        image_vectors = self.ctx.store.load_image_vectors()
         slides_by_file: Dict[str, Dict[int, Dict[str, Any]]] = {}
         for slide_id, text in slide_pages.items():
             if not isinstance(slide_id, str) or "#" not in slide_id:
@@ -188,10 +251,8 @@ class PageStatusTab(QWidget):
                 for slide in slide_map.values():
                     rows.append(self._build_row_from_slide(slide, file_map.get(slide.get("file_id"))))
 
-        self._cached_rows = rows
         metrics = self._compute_metrics(files, rows)
-        self._render_metrics(metrics)
-        self.refresh_table()
+        return {"rows": rows, "metrics": metrics}
 
     def refresh_table(self) -> None:
         kw = (self.filter_edit.text() or "").strip().lower()
