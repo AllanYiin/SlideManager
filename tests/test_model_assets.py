@@ -4,10 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 from unittest.mock import patch
-
-from requests.cookies import RequestsCookieJar
 
 # 讓 unittest 在任何工作目錄下都能找到 src/app
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,13 +22,13 @@ class FakeResponse:
         *,
         status_code: int = 200,
         headers: Optional[dict] = None,
-        cookies: Optional[RequestsCookieJar] = None,
+        cookies: Optional[Dict[str, str]] = None,
         text: str = "",
         content_chunks: Optional[Iterable[bytes]] = None,
     ) -> None:
         self.status_code = status_code
         self.headers = headers or {}
-        self.cookies = cookies or RequestsCookieJar()
+        self.cookies = cookies or {}
         self.text = text
         self._content_chunks = list(content_chunks or [])
 
@@ -76,8 +74,7 @@ class TestDownloadFromGoogleDrive(unittest.TestCase):
         self.assertTrue(any(p.stage == "download" for p in progress))
 
     def test_downloads_after_confirm_token(self) -> None:
-        cookies = RequestsCookieJar()
-        cookies.set("download_warning_123", "token123")
+        cookies = {"download_warning_123": "token123"}
         first_response = FakeResponse(
             headers={"Content-Type": "text/html"},
             cookies=cookies,
