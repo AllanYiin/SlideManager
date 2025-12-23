@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import importlib
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from app.services import model_assets
+model_assets = importlib.import_module("app.services.model_assets")
 
 
 @unittest.skipUnless(RequestsCookieJar, "requests 尚未安裝")
