@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import concurrent.futures
-import hashlib
+import zlib
 import json
 import os
 import time
@@ -138,11 +138,8 @@ class EmbeddingService:
         return [o if o is not None else np.zeros((self.cfg.text_dim,), dtype=np.float32) for o in out]
 
     def _cache_key(self, text: str) -> str:
-        h = hashlib.sha256()
-        h.update(self.cfg.text_model.encode("utf-8"))
-        h.update(b"|")
-        h.update(text.encode("utf-8", errors="ignore"))
-        return h.hexdigest()
+        payload = f"{self.cfg.text_model}|{text}".encode("utf-8", errors="ignore")
+        return f"{zlib.adler32(payload):08x}"
 
     def _load_cache(self) -> Dict[str, List[float]]:
         if not self._cache_path or not self._cache_path.exists():

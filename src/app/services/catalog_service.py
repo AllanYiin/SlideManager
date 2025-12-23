@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 from pathlib import Path
+import base64
 from typing import Any, Dict, List, Optional, Callable
 
 from app.core.logging import get_logger
@@ -46,12 +46,13 @@ def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
     return files
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _build_file_fingerprint(abs_path: str, mtime: int, size: int) -> str:
+    return f"{abs_path}|{mtime}|{size}"
+
+
+def _make_file_id(abs_path: str) -> str:
+    raw = abs_path.strip().encode("utf-8", errors="ignore")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 class CatalogService:
@@ -134,6 +135,7 @@ class CatalogService:
         *,
         on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
         progress_every: int = 10,
+        cancel_flag: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """掃描白名單目錄，更新 manifest.json。"""
         whitelist = self._load_whitelist()
@@ -146,6 +148,9 @@ class CatalogService:
         batch: List[Dict[str, Any]] = []
         scanned_count = 0
         for entry in whitelist:
+            if cancel_flag and cancel_flag():
+                log.info("掃描已取消")
+                return {"cancelled": True}
             if not entry.get("enabled", True):
                 continue
             root = Path(str(entry.get("path")))
@@ -171,6 +176,9 @@ class CatalogService:
                 continue
             try:
                 for path in _iter_pptx_files(root, entry.get("recursive", True)):
+                    if cancel_flag and cancel_flag():
+                        log.info("掃描已取消")
+                        return {"cancelled": True}
                     if path.name.startswith("~$"):
                         continue
                     try:
@@ -182,13 +190,8 @@ class CatalogService:
                         # 快速判斷是否需要重算 hash
                         mtime = int(st.st_mtime)
                         size = int(st.st_size)
-                        file_hash = None
-                        if prev and int(prev.get("size", -1)) == size and int(prev.get("modified_time", -1)) == mtime:
-                            file_hash = prev.get("file_hash")
-                        if not file_hash:
-                            file_hash = _sha256_file(path)
-
-                        file_id = hashlib.sha256(abs_path.encode("utf-8", errors="ignore")).hexdigest()
+                        file_hash = _build_file_fingerprint(abs_path, mtime, size)
+                        file_id = _make_file_id(abs_path)
                         core_props = prev.get("core_properties") if prev else None
                         slide_count = prev.get("slide_count") if prev else None
                         if prev and (prev.get("metadata_mtime") != mtime or prev.get("metadata_size") != size):
