@@ -84,6 +84,7 @@ class LibraryTab(QWidget):
         self._cached_files: List[Dict[str, Any]] = []
         self._index_status_payload: Dict[str, Any] = {}
         self._index_action_inflight = False
+        self._index_scope_only = False
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -647,12 +648,14 @@ class LibraryTab(QWidget):
     def start_index_needed(self) -> None:
         if not self.ctx:
             return
+        self._index_scope_only = False
         self._set_last_action("準備索引（需要者）", lambda: self.start_index_needed())
         self._prepare_index_needed()
 
     def start_index_selected(self) -> None:
         if not self.ctx:
             return
+        self._index_scope_only = True
         files = self.selected_files()
         if not files:
             QMessageBox.information(self, "未選取", "請先在右側表格選取檔案")
@@ -710,7 +713,6 @@ class LibraryTab(QWidget):
         self._set_prepare_ui("正在掃描並整理選取檔案...")
 
         def task():
-            self.ctx.catalog.scan()
             cat = self.ctx.store.load_manifest()
             files = [e for e in cat.get("files", []) if isinstance(e, dict)]
             selected = []
@@ -730,9 +732,9 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
-        self._request_index_mode(files)
+        self._request_index_mode(files, scope_only=True)
 
-    def _request_index_mode(self, files: List[Dict[str, Any]]) -> None:
+    def _request_index_mode(self, files: List[Dict[str, Any]], scope_only: bool = False) -> None:
         if not self.ctx:
             return
         self._set_prepare_ui("正在整理索引狀態...")
@@ -744,21 +746,26 @@ class LibraryTab(QWidget):
             try:
                 store = ctx.store
                 paths = store.paths
-                manifest = store.load_manifest()
-                slide_pages = store.load_slide_pages()
+                manifest = None if scope_only else store.load_manifest()
+                slide_pages = [] if scope_only else store.load_slide_pages()
 
-                total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
                 scope_files = len(files)
-                indexed_files = sum(
-                    1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
-                )
+                if scope_only:
+                    total_files = scope_files
+                    indexed_files = sum(1 for e in files if isinstance(e, dict) and e.get("indexed"))
+                else:
+                    total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
+                    indexed_files = sum(
+                        1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
+                    )
 
                 thumbs_count = 0
-                try:
-                    if paths.thumbs_dir.exists():
-                        thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
-                except Exception as exc:
-                    log.warning("讀取縮圖快取數量失敗：%s", exc)
+                if not scope_only:
+                    try:
+                        if paths.thumbs_dir.exists():
+                            thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
+                    except Exception as exc:
+                        log.warning("讀取縮圖快取數量失敗：%s", exc)
 
                 def fmt_time(ts: int | None) -> str:
                     if not ts:
@@ -791,11 +798,13 @@ class LibraryTab(QWidget):
 
                 fill_needed = False
 
+                slide_pages_summary = "略過（選取檔案）" if scope_only else str(len(slide_pages))
+                thumbs_summary = "略過（選取檔案）" if scope_only else f"{thumbs_count} 張"
                 details = (
                     f"本次範圍：{scope_files} 個檔案\n"
                     f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
-                    f"投影片文字（slide_pages.json）：{len(slide_pages)}\n"
-                    f"縮圖快取：{thumbs_count} 張\n"
+                    f"投影片文字（slide_pages.json）：{slide_pages_summary}\n"
+                    f"縮圖快取：{thumbs_summary}\n"
                     "索引時間：以 manifest.json 的 indexed_at 為準"
                 )
 
@@ -894,7 +903,7 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             return
         QMessageBox.information(self, "轉換完成", "已完成舊版資料轉換並寫入新版檔案。")
-        self._request_index_mode(files)
+        self._request_index_mode(files, scope_only=self._index_scope_only)
 
     def _run_fill_missing_index_timestamps(self, files: List[Dict[str, Any]]) -> None:
         if not self.ctx:
@@ -945,7 +954,7 @@ class LibraryTab(QWidget):
             "補齊完成",
             f"已補齊 {updated} 筆索引更新時間（來源：slide_pages.json 或 index.json 存檔日）。",
         )
-        self._request_index_mode(files)
+        self._request_index_mode(files, scope_only=self._index_scope_only)
 
 
     def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool) -> None:
