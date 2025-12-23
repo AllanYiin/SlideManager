@@ -8,7 +8,7 @@ from pathlib import Path
 def app_home_dir() -> Path:
     """回傳使用者層級的 App 資料夾。
 
-    Windows：%APPDATA%\LocalSlideManager
+    Windows：%APPDATA%\\LocalSlideManager
     其他：~/.local_slide_manager
     """
     import os

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 import numpy as np
 
@@ -222,6 +222,12 @@ class ProjectStore:
     def load_image_vectors(self) -> Dict[str, np.ndarray]:
         return self._load_vectors(self.paths.vec_image_npz, self.paths.vec_image_delta_npz)
 
+    def load_text_vector_keys(self) -> Set[str]:
+        return self._load_vector_keys(self.paths.vec_text_npz, self.paths.vec_text_delta_npz)
+
+    def load_image_vector_keys(self) -> Set[str]:
+        return self._load_vector_keys(self.paths.vec_image_npz, self.paths.vec_image_delta_npz)
+
     def append_text_vectors(self, vectors: Dict[str, np.ndarray]) -> None:
         self._append_vectors(self.paths.vec_text_delta_npz, vectors)
 
@@ -246,6 +252,11 @@ class ProjectStore:
         if delta:
             vectors.update(delta)
         return vectors
+
+    def _load_vector_keys(self, snapshot_path: Path, delta_path: Path) -> Set[str]:
+        keys = self._load_npz_keys(snapshot_path)
+        keys.update(self._load_npz_keys(delta_path))
+        return keys
 
     def _append_vectors(self, delta_path: Path, vectors: Dict[str, np.ndarray]) -> None:
         if not vectors:
@@ -275,6 +286,16 @@ class ProjectStore:
         except Exception as exc:
             log.warning("讀取向量檔失敗：%s (%s)", path, exc)
             return {}
+
+    def _load_npz_keys(self, path: Path) -> Set[str]:
+        if not path.exists():
+            return set()
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                return set(data.files)
+        except Exception as exc:
+            log.warning("讀取向量索引失敗：%s (%s)", path, exc)
+            return set()
 
     def _save_npz_map(self, path: Path, data: Dict[str, np.ndarray]) -> None:
         try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import importlib
 import os
 import shutil
 import subprocess
@@ -40,6 +41,12 @@ class Renderer(Protocol):
 
 def _has_pymupdf() -> bool:
     return find_spec("fitz") is not None
+
+
+def _has_uno_modules() -> bool:
+    if find_spec("uno") is None:
+        return False
+    return find_spec("com.sun.star") is not None or find_spec("com") is not None
 
 
 def _pdf_to_pngs(pdf_path: Path, out_dir: Path, dpi: int = 200) -> List[Path]:
@@ -96,7 +103,11 @@ class LibreOfficeListener:
             self._process = None
 
     def _connect(self):
-        import uno
+        try:
+            uno = importlib.import_module("uno")
+        except ModuleNotFoundError as exc:
+            log.exception("UNO 模組未安裝")
+            raise RuntimeError("未安裝 UNO 模組，請安裝 LibreOffice UNO 相關套件") from exc
 
         local_ctx = uno.getComponentContext()
         resolver = local_ctx.ServiceManager.createInstanceWithContext(
@@ -115,7 +126,12 @@ class LibreOfficeListener:
         raise RuntimeError("LibreOffice UNO 連線失敗") from last_error
 
     def convert_to_pdf(self, pptx_path: Path, pdf_path: Path) -> None:
-        from com.sun.star.beans import PropertyValue
+        try:
+            beans = importlib.import_module("com.sun.star.beans")
+        except ModuleNotFoundError as exc:
+            log.exception("UNO 模組未安裝")
+            raise RuntimeError("未安裝 UNO 模組，請安裝 LibreOffice UNO 相關套件") from exc
+        PropertyValue = getattr(beans, "PropertyValue")
 
         self.start()
         ctx = self._connect()
@@ -145,14 +161,14 @@ class LibreOfficeListenerRenderer:
     def available(self) -> bool:
         return (
             bool(self._soffice)
-            and find_spec("uno") is not None
+            and _has_uno_modules()
             and _has_pymupdf()
         )
 
     def status_message(self) -> str:
         if not self._soffice:
             return "未偵測到 LibreOffice"
-        if find_spec("uno") is None:
+        if not _has_uno_modules():
             return "未安裝 UNO"
         if not _has_pymupdf():
             return "未安裝 PyMuPDF"

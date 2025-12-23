@@ -83,7 +83,7 @@ class IndexService:
 
         self.extractor = ExtractionService()
         self.renderer = RenderService(self.store.paths.thumbs_dir)
-        self.image_embedder = ImageEmbeddingService(self.store.paths.cache_dir, version="1")
+        self.image_embedder = ImageEmbeddingService(self.store.paths.cache_dir, version="1", autoload=False)
         self.embeddings = EmbeddingService(api_key, self.emb_cfg, cache_dir=self.store.paths.cache_dir)
 
     @staticmethod

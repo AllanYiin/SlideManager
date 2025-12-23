@@ -41,6 +41,29 @@ class _RateLimiter:
             time.sleep(min(wait_for, self._min_interval))
 
 
+class _TokenRateLimiter:
+    def __init__(self, tpm: int):
+        self._tpm = max(int(tpm), 1)
+        self._window = 60.0
+        self._lock = threading.Lock()
+        self._events: List[tuple[float, int]] = []
+
+    def wait(self, tokens: int) -> None:
+        tokens = max(int(tokens), 1)
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - self._window
+                while self._events and self._events[0][0] <= cutoff:
+                    self._events.pop(0)
+                used = sum(t for _, t in self._events)
+                if used + tokens <= self._tpm:
+                    self._events.append((now, tokens))
+                    return
+                wait_for = self._events[0][0] + self._window - now
+            time.sleep(max(0.05, wait_for))
+
+
 class OpenAIClient:
     def __init__(self, api_key: str):
         from openai import OpenAI
@@ -48,13 +71,21 @@ class OpenAIClient:
         self._client = OpenAI(api_key=api_key)
         rpm = int(os.getenv("OPENAI_RPM", "50") or 50)
         self._rate_limiter = _RateLimiter(rpm) if rpm > 0 else None
+        embed_rpm = int(os.getenv("OPENAI_EMBED_RPM", "10000") or 10000)
+        embed_tpm = int(os.getenv("OPENAI_EMBED_TPM", "5000000") or 5000000)
+        self._embed_rate_limiter = _RateLimiter(embed_rpm) if embed_rpm > 0 else None
+        self._embed_token_limiter = _TokenRateLimiter(embed_tpm) if embed_tpm > 0 else None
 
-    def embed_texts(self, texts: List[str], model: str) -> List[List[float]]:
+    def embed_texts(self, texts: List[str], model: str, token_counts: Optional[List[int]] = None) -> List[List[float]]:
         """同步 embeddings（逐筆查詢）。"""
         out: List[List[float]] = []
-        for text in texts:
-            if self._rate_limiter:
-                self._rate_limiter.wait()
+        token_counts = token_counts or []
+        for idx, text in enumerate(texts):
+            if self._embed_rate_limiter:
+                self._embed_rate_limiter.wait()
+            if self._embed_token_limiter:
+                tokens = token_counts[idx] if idx < len(token_counts) else max(1, int(len(text) / 4))
+                self._embed_token_limiter.wait(tokens)
             resp = self._client.embeddings.create(
                 model=model,
                 input=text,

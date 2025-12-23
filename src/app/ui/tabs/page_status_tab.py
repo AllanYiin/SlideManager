@@ -142,9 +142,9 @@ class PageStatusTab(QWidget):
                 catalog = ctx.store.load_manifest()
                 files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
                 slide_pages = ctx.store.load_slide_pages()
-                text_vectors = ctx.store.load_text_vectors()
-                image_vectors = ctx.store.load_image_vectors()
-                payload = self._build_rows_payload(files, slide_pages, text_vectors, image_vectors)
+                text_vector_keys = ctx.store.load_text_vector_keys()
+                image_vector_keys = ctx.store.load_image_vector_keys()
+                payload = self._build_rows_payload(files, slide_pages, text_vector_keys, image_vector_keys)
                 return {"ok": True, **payload}
             except Exception as exc:
                 return {
@@ -201,8 +201,8 @@ class PageStatusTab(QWidget):
         self,
         files: List[Dict[str, Any]],
         slide_pages: Dict[str, str],
-        text_vectors: Dict[str, Any],
-        image_vectors: Dict[str, Any],
+        text_vector_keys: set[str],
+        image_vector_keys: set[str],
     ) -> Dict[str, Any]:
         file_map = {f.get("file_id"): f for f in files if f.get("file_id")}
         slides_by_file: Dict[str, Dict[int, Dict[str, Any]]] = {}
@@ -219,9 +219,9 @@ class PageStatusTab(QWidget):
             flags = {
                 "has_text": bool(text_value.strip()),
                 "has_bm25": bool(text_value.strip()),
-                "has_text_vec": slide_id in text_vectors,
+                "has_text_vec": slide_id in text_vector_keys,
                 "has_image": thumb_path.exists(),
-                "has_image_vec": slide_id in image_vectors,
+                "has_image_vec": slide_id in image_vector_keys,
             }
             slides_by_file.setdefault(file_id, {})[slide_no] = {
                 "file_id": file_id,

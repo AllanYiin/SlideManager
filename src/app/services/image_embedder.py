@@ -169,13 +169,23 @@ class ImageModelStatus:
 class ImageEmbeddingService:
     """圖片向量服務（支援模型快取/版本與退化）。"""
 
-    def __init__(self, cache_dir: Path, *, model_name: str = "rerankTexure.onnx", version: str = "1"):
+    def __init__(
+        self,
+        cache_dir: Path,
+        *,
+        model_name: str = "rerankTexure.onnx",
+        version: str = "1",
+        autoload: bool = True,
+    ):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.model_path = self.cache_dir / model_name
         self.version = version
         self._embedder: Optional[ImageEmbedder] = None
-        self._status = self._load_embedder()
+        if autoload:
+            self._status = self._load_embedder()
+        else:
+            self._status = ImageModelStatus(self.model_path, self.version, False, "尚未載入圖片模型")
         self._write_metadata()
 
     def _load_embedder(self) -> ImageModelStatus:

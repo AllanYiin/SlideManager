@@ -250,19 +250,47 @@ class MainWindow(QMainWindow):
     def _on_model_ready(self, model_path: object) -> None:
         if not self.ctx or self._model_download_project_root != self.ctx.project_root:
             return
+        self._load_image_model_async()
+
+    def _load_image_model_async(self) -> None:
+        if not self.ctx or self._model_download_project_root != self.ctx.project_root:
+            return
+
+        def task():
+            return self.ctx.indexer.image_embedder.reload()
+
+        self.status.showMessage("載入圖片模型中...")
+        self.model_download_prog.setRange(0, 0)
+        self.model_download_prog.setVisible(True)
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_model_loaded)
+        w.signals.error.connect(self._on_model_load_error)
+        self.thread_pool.start(w)
+
+    def _on_model_loaded(self, status: object) -> None:
+        if not self.ctx or self._model_download_project_root != self.ctx.project_root:
+            return
         try:
-            status = self.ctx.indexer.image_embedder.reload()
-            if status.available:
+            if hasattr(status, "available") and status.available:
                 self.status.showMessage("圖片模型已就緒")
                 self.show_toast("圖片模型已就緒", level="info")
             else:
                 self.status.showMessage("圖片模型載入失敗")
                 self.show_toast("圖片模型載入失敗，請查看 logs/app.log", level="error", timeout_ms=12000)
-            self.model_download_prog.setVisible(False)
         except Exception as exc:
             log.exception("更新圖片模型狀態失敗：%s", exc)
             self.show_toast("更新圖片模型狀態失敗，請查看 logs/app.log", level="error", timeout_ms=12000)
+        finally:
             self.model_download_prog.setVisible(False)
+
+    def _on_model_load_error(self, tb: str) -> None:
+        if not self.ctx or self._model_download_project_root != self.ctx.project_root:
+            return
+        log.error("圖片模型載入錯誤\n%s", tb)
+        self.status.showMessage("圖片模型載入失敗")
+        self.show_toast("圖片模型載入失敗，請查看 logs/app.log", level="error", timeout_ms=12000)
+        self.model_download_prog.setVisible(False)
 
     def _on_model_error(self, tb: str) -> None:
         if not self.ctx or self._model_download_project_root != self.ctx.project_root:

@@ -18,3 +18,8 @@ jobs:
 
       - name: Compile Python files
         run: python -m compileall src tests
+
+      - name: Check imports and requirements
+        run: |
+          python scripts/check_imports.py
+          python scripts/check_requirements.py

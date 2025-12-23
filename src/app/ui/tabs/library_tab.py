@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
@@ -71,8 +71,8 @@ class LibraryTab(QWidget):
 
         self._metrics_timer.timeout.connect(self._flush_metrics_refresh)
         self._indexing_active = False
-        self._cached_text_vectors: Dict[str, Any] = {}
-        self._cached_image_vectors: Dict[str, Any] = {}
+        self._cached_text_vector_keys: Set[str] = set()
+        self._cached_image_vector_keys: Set[str] = set()
         self._vectors_loaded = False
         self._vector_mtimes = {
             "text": None,
@@ -359,8 +359,8 @@ class LibraryTab(QWidget):
             return
         self._table_refresh_inflight = True
         ctx = self.ctx
-        cached_text_vectors = self._cached_text_vectors
-        cached_image_vectors = self._cached_image_vectors
+        cached_text_vector_keys = self._cached_text_vector_keys
+        cached_image_vector_keys = self._cached_image_vector_keys
         vectors_loaded = self._vectors_loaded
         vector_mtimes = dict(self._vector_mtimes)
 
@@ -378,11 +378,11 @@ class LibraryTab(QWidget):
                     "image_delta": paths.vec_image_delta_npz.stat().st_mtime if paths.vec_image_delta_npz.exists() else None,
                 }
                 if not vectors_loaded or current_mtimes != vector_mtimes:
-                    text_vectors = ctx.store.load_text_vectors()
-                    image_vectors = ctx.store.load_image_vectors()
+                    text_vector_keys = ctx.store.load_text_vector_keys()
+                    image_vector_keys = ctx.store.load_image_vector_keys()
                 else:
-                    text_vectors = cached_text_vectors
-                    image_vectors = cached_image_vectors
+                    text_vector_keys = cached_text_vector_keys
+                    image_vector_keys = cached_image_vector_keys
                 slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
                 for slide_id, text in slide_pages.items():
                     if not isinstance(slide_id, str):
@@ -400,9 +400,9 @@ class LibraryTab(QWidget):
                     flags = {
                         "has_text": bool(text_value.strip()),
                         "has_bm25": bool(text_value.strip()),
-                        "has_text_vec": slide_id in text_vectors,
+                        "has_text_vec": slide_id in text_vector_keys,
                         "has_image": has_image,
-                        "has_image_vec": slide_id in image_vectors,
+                        "has_image_vec": slide_id in image_vector_keys,
                     }
                     slide_entry = {
                         "slide_id": slide_id,
@@ -417,8 +417,8 @@ class LibraryTab(QWidget):
                     "ok": True,
                     "files": files,
                     "slides_by_file_id": slides_by_file_id,
-                    "text_vectors": text_vectors,
-                    "image_vectors": image_vectors,
+                    "text_vector_keys": text_vector_keys,
+                    "image_vector_keys": image_vector_keys,
                     "vector_mtimes": current_mtimes,
                 }
             except Exception as exc:
@@ -453,8 +453,8 @@ class LibraryTab(QWidget):
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast("載入檔案清單失敗，已寫入 logs/app.log。", level="error")
             return
-        self._cached_text_vectors = payload.get("text_vectors", {})
-        self._cached_image_vectors = payload.get("image_vectors", {})
+        self._cached_text_vector_keys = payload.get("text_vector_keys", set())
+        self._cached_image_vector_keys = payload.get("image_vector_keys", set())
         self._vector_mtimes = payload.get("vector_mtimes", self._vector_mtimes)
         self._vectors_loaded = True
         self._slides_by_file_id = payload.get("slides_by_file_id", {})
@@ -720,7 +720,7 @@ class LibraryTab(QWidget):
                     selected.append(entry)
             return selected
 
-        w = Worker(task, None)
+        w = Worker(task)
         w.signals.finished.connect(self._on_prepare_index_selected_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
@@ -730,9 +730,9 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
-        self._request_index_mode(files)
+        self._request_index_mode(files, scope_only=True)
 
-    def _request_index_mode(self, files: List[Dict[str, Any]]) -> None:
+    def _request_index_mode(self, files: List[Dict[str, Any]], scope_only: bool = False) -> None:
         if not self.ctx:
             return
         self._set_prepare_ui("正在整理索引狀態...")
@@ -745,20 +745,25 @@ class LibraryTab(QWidget):
                 store = ctx.store
                 paths = store.paths
                 manifest = store.load_manifest()
-                slide_pages = store.load_slide_pages()
+                slide_pages = [] if scope_only else store.load_slide_pages()
 
-                total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
                 scope_files = len(files)
-                indexed_files = sum(
-                    1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
-                )
+                if scope_only:
+                    total_files = scope_files
+                    indexed_files = sum(1 for e in files if isinstance(e, dict) and e.get("indexed"))
+                else:
+                    total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
+                    indexed_files = sum(
+                        1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
+                    )
 
                 thumbs_count = 0
-                try:
-                    if paths.thumbs_dir.exists():
-                        thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
-                except Exception as exc:
-                    log.warning("讀取縮圖快取數量失敗：%s", exc)
+                if not scope_only:
+                    try:
+                        if paths.thumbs_dir.exists():
+                            thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
+                    except Exception as exc:
+                        log.warning("讀取縮圖快取數量失敗：%s", exc)
 
                 def fmt_time(ts: int | None) -> str:
                     if not ts:
@@ -791,11 +796,13 @@ class LibraryTab(QWidget):
 
                 fill_needed = False
 
+                slide_pages_summary = "略過" if scope_only else str(len(slide_pages))
+                thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
                 details = (
                     f"本次範圍：{scope_files} 個檔案\n"
                     f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
-                    f"投影片文字（slide_pages.json）：{len(slide_pages)}\n"
-                    f"縮圖快取：{thumbs_count} 張\n"
+                    f"投影片文字（slide_pages.json）：{slide_pages_summary}\n"
+                    f"縮圖快取：{thumbs_summary}\n"
                     "索引時間：以 manifest.json 的 indexed_at 為準"
                 )
 
@@ -1078,8 +1085,8 @@ class LibraryTab(QWidget):
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self._vectors_loaded = False
-        self._cached_text_vectors = {}
-        self._cached_image_vectors = {}
+        self._cached_text_vector_keys = set()
+        self._cached_image_vector_keys = set()
         self.refresh_table()
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):
