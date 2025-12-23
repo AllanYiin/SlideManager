@@ -126,7 +126,8 @@ class EmbeddingService:
         delays = [0.5, 1.0, 2.0]
         for attempt, delay in enumerate(delays, start=1):
             try:
-                vecs = self._client.embed_texts([text], self.cfg.text_model)
+                token_count = self._estimate_tokens(text)
+                vecs = self._client.embed_texts([text], self.cfg.text_model, [token_count])
                 if vecs:
                     return vecs[0]
                 raise EmbeddingError("OpenAI embedding response is empty")
