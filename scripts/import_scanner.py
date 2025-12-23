@@ -32,13 +32,18 @@ def local_top_level_modules(repo_root: Path) -> set[str]:
         base = repo_root / "src" if (repo_root / "src") in path.parents else repo_root
         rel = path.relative_to(base)
         if rel.parts:
-            modules.add(rel.parts[0])
+            top_level = rel.parts[0]
+            if top_level.endswith(".py"):
+                top_level = Path(top_level).stem
+            modules.add(top_level)
+        if path.parent == repo_root / "scripts":
+            modules.add(path.stem)
     return modules
 
 
 def module_exists(repo_root: Path, module_name: str) -> bool:
     parts = module_name.split(".")
-    for base in (repo_root / "src", repo_root):
+    for base in (repo_root / "src", repo_root, repo_root / "scripts"):
         module_path = base.joinpath(*parts)
         if module_path.with_suffix(".py").exists():
             return True
