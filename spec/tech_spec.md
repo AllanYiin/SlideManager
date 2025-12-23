@@ -101,7 +101,7 @@
 
 * **Infra Layer**
 
-  * FileSystemAdapter（掃描、mtime、hash）
+  * FileSystemAdapter（掃描、mtime、size、path fingerprint）
   * OpenAIClient（embeddings、chat streaming）
   * OnnxRuntimeAdapter（模型下載/載入/推論）
   * Tokenizer（BM25 用）
@@ -211,11 +211,12 @@
   "schema_version": "2.0",
   "files": [
     {
-      "file_id": "sha256(abs_path)",
+      "file_id": "base64url(abs_path)",
       "abs_path": "/Users/me/slides/A.pptx",
       "filename": "A.pptx",
       "size": 1234567,
       "modified_time": 1730000000,
+      "file_hash": "/Users/me/slides/A.pptx|1730000000|1234567",
       "slide_count": 42
     }
   ],
@@ -438,7 +439,7 @@
 * **可續跑**：索引中斷（關閉 App、取消、斷網）後可從 JSON 狀態恢復
 * **快取**：
 
-  * OpenAI embeddings：以 `hash(all_text + model)` 做快取，避免重複呼叫
+* OpenAI embeddings：以 `checksum(all_text + model)` 做快取，避免重複呼叫
   * ONNX 模型檔：下載後 cache，支援版本號
 * **原子寫入**：JSON 寫入 temp → replace，避免壞檔
 * **可觀測**：log 檔、錯誤摘要、失敗重試次數、最後錯誤原因
@@ -461,8 +462,8 @@
 ### 11. Edge / Abuse Cases（必列）
 
 * 白名單路徑被移除/無權限 → 掃描跳過並提示
-* 同名檔案不同路徑 → 以 `file_id`（hash path）區分
-* 檔案被改名/搬移 → 若以 path hash 作 file_id，會視為新檔；可選做「內容 hash」來追蹤（成本較高）
+* 同名檔案不同路徑 → 以 `file_id`（base64url path）區分
+* 檔案被改名/搬移 → 若以 path 為 file_id，會視為新檔；可選做「內容 fingerprint」來追蹤（成本較高）
 * 索引時檔案被使用者打開並另存 → mtime 變動：當輪索引結束後應再次檢查 mtime，若變更則標記「需再索引」
 * 文字抽取為空（只有圖）→ 仍可做圖片索引
 * 縮圖生成失敗 → 仍可文字索引，並在結果列表標「無縮圖」

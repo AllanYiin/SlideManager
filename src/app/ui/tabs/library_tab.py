@@ -54,10 +54,14 @@ class LibraryTab(QWidget):
 
         self._cancel_index = False
         self._pause_index = False
+        self._cancel_scan = False
+        self._cancel_prepare = False
+        self._prepare_in_progress = False
         self._last_action = None
         self._last_action_label = ""
         self._scan_files_cache: List[Dict[str, Any]] = []
         self._scan_count = 0
+        self._prepare_scan_count = 0
         self._pending_table_refresh = False
         self._pending_metrics_refresh = False
         self._refresh_timer = QTimer(self)
@@ -284,16 +288,18 @@ class LibraryTab(QWidget):
         self.prog_label.setText("掃描中...")
         self.prog.setRange(0, 0)
         self._scan_in_progress = True
+        self._cancel_scan = False
         self._scan_files_cache = []
         self._scan_count = 0
         self._meta_files: Dict[str, Any] = {}
         self._slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
+        self.btn_cancel.setEnabled(True)
 
-        def task(_progress_emit):
-            return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10)
+        def task(_progress_emit, _cancel_flag):
+            return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10, cancel_flag=_cancel_flag)
 
         w = Worker(task)
-        w.args = (w.signals.progress.emit,)
+        w.args = (w.signals.progress.emit, lambda: self._cancel_scan)
         w.signals.progress.connect(self._on_scan_progress)
         w.signals.finished.connect(self._on_scan_done)
         w.signals.error.connect(self._on_error)
@@ -316,12 +322,22 @@ class LibraryTab(QWidget):
             log.exception("更新掃描進度失敗")
 
     def _on_scan_done(self, _result: object) -> None:
+        if isinstance(_result, dict) and _result.get("cancelled"):
+            self.prog.setRange(0, 100)
+            self.prog.setValue(0)
+            self.prog_label.setText("掃描已取消")
+            self._scan_in_progress = False
+            self._scan_files_cache = []
+            self._scan_count = 0
+            self.btn_cancel.setEnabled(False)
+            return
         self.prog.setRange(0, 100)
         self.prog.setValue(0)
         self.prog_label.setText("掃描完成")
         self._scan_in_progress = False
         self._scan_files_cache = []
         self._scan_count = 0
+        self.btn_cancel.setEnabled(False)
         self.refresh_table()
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):
@@ -695,7 +711,7 @@ class LibraryTab(QWidget):
     def _set_prepare_ui(self, label: str) -> None:
         self.btn_index_needed.setEnabled(False)
         self.btn_index_selected.setEnabled(False)
-        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("暫停")
         self.prog.setRange(0, 0)
@@ -710,22 +726,35 @@ class LibraryTab(QWidget):
         self.prog_label.setText("")
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self._prepare_in_progress = False
 
     def _prepare_index_needed(self) -> None:
         if not self.ctx:
             return
         self._set_prepare_ui("正在掃描並整理索引需求...")
+        self._prepare_scan_count = 0
+        self._prepare_in_progress = True
+        self._cancel_prepare = False
 
-        def task():
-            self.ctx.catalog.scan()
+        def task(_progress_emit, _cancel_flag):
+            result = self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10, cancel_flag=_cancel_flag)
+            if isinstance(result, dict) and result.get("cancelled"):
+                return {"cancelled": True}
             return self.ctx.indexer.compute_needed_files()
 
         w = Worker(task)
+        w.args = (w.signals.progress.emit, lambda: self._cancel_prepare)
+        w.signals.progress.connect(self._on_prepare_scan_progress)
         w.signals.finished.connect(self._on_prepare_index_needed_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
 
     def _on_prepare_index_needed_done(self, files: List[Dict[str, Any]]) -> None:
+        if isinstance(files, dict) and files.get("cancelled"):
+            self.prog_label.setText("已取消")
+            self._reset_prepare_ui()
+            return
         if not files:
             self._reset_prepare_ui()
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
@@ -736,13 +765,19 @@ class LibraryTab(QWidget):
         if not self.ctx:
             return
         self._set_prepare_ui("正在整理選取檔案...")
+        self._prepare_in_progress = True
+        self._cancel_prepare = False
 
         def task():
+            if self._cancel_prepare:
+                return {"cancelled": True}
             cat = self.ctx.store.load_manifest()
             files = [e for e in cat.get("files", []) if isinstance(e, dict)]
             selected_set = {p for p in selected_paths if p}
             selected = []
             for entry in files:
+                if self._cancel_prepare:
+                    return {"cancelled": True}
                 path = entry.get("abs_path")
                 if path and path in selected_set:
                     selected.append(entry)
@@ -765,6 +800,10 @@ class LibraryTab(QWidget):
         self.main_window.thread_pool.start(w)
 
     def _on_prepare_index_selected_done(self, files: List[Dict[str, Any]]) -> None:
+        if isinstance(files, dict) and files.get("cancelled"):
+            self.prog_label.setText("已取消")
+            self._reset_prepare_ui()
+            return
         if not files:
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
@@ -804,13 +843,19 @@ class LibraryTab(QWidget):
         self._set_prepare_ui("正在整理索引狀態...")
         ctx = self.ctx
 
-        def task():
+        def task(_progress_emit):
             import traceback
 
             try:
+                if self._cancel_prepare:
+                    return {"ok": False, "cancelled": True}
+                if _progress_emit:
+                    _progress_emit({"stage": "manifest", "message": "正在讀取索引清單..."})
                 store = ctx.store
                 paths = store.paths
                 manifest = store.load_manifest()
+                if _progress_emit and not scope_only:
+                    _progress_emit({"stage": "slide_pages", "message": "正在讀取投影片文字索引..."})
                 slide_pages = [] if scope_only else store.load_slide_pages()
 
                 scope_files = len(files)
@@ -827,7 +872,20 @@ class LibraryTab(QWidget):
                 if not scope_only:
                     try:
                         if paths.thumbs_dir.exists():
-                            thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
+                            if _progress_emit:
+                                _progress_emit({"stage": "thumbs", "message": "正在統計縮圖快取..."})
+                            for idx, thumb in enumerate(paths.thumbs_dir.rglob("*.png"), start=1):
+                                if self._cancel_prepare:
+                                    return {"ok": False, "cancelled": True}
+                                if thumb.is_file():
+                                    thumbs_count += 1
+                                if _progress_emit and idx % 50 == 0:
+                                    _progress_emit(
+                                        {
+                                            "stage": "thumbs",
+                                            "message": f"正在統計縮圖快取... 已掃描 {idx} 筆",
+                                        }
+                                    )
                     except Exception as exc:
                         log.warning("讀取縮圖快取數量失敗：%s", exc)
 
@@ -865,12 +923,21 @@ class LibraryTab(QWidget):
                 slide_pages_summary = "略過" if scope_only else str(len(slide_pages))
                 thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
                 scope_file_names = []
-                for entry in files:
+                for idx, entry in enumerate(files, start=1):
+                    if self._cancel_prepare:
+                        return {"ok": False, "cancelled": True}
                     if not isinstance(entry, dict):
                         continue
                     path = entry.get("abs_path")
                     if path:
                         scope_file_names.append(Path(path).name)
+                    if _progress_emit and idx % 50 == 0:
+                        _progress_emit(
+                            {
+                                "stage": "scope",
+                                "message": f"正在整理檔案清單... 已處理 {idx} 筆",
+                            }
+                        )
                 scope_names_display = "、".join(scope_file_names[:20]) if scope_file_names else "（無）"
                 if len(scope_file_names) > 20:
                     scope_names_display += "…"
@@ -916,11 +983,17 @@ class LibraryTab(QWidget):
                 }
 
         w = Worker(task)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_prepare_status_progress)
         w.signals.finished.connect(lambda payload: self._on_index_status_ready(files, payload))
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
 
     def _on_index_status_ready(self, files: List[Dict[str, Any]], payload: object) -> None:
+        if isinstance(payload, dict) and payload.get("cancelled"):
+            self.prog_label.setText("已取消")
+            self._reset_prepare_ui()
+            return
         if not isinstance(payload, dict) or not payload.get("ok"):
             log.error("整理索引狀態失敗\n%s", payload if isinstance(payload, dict) else payload)
             if hasattr(self.main_window, "show_toast"):
@@ -939,6 +1012,26 @@ class LibraryTab(QWidget):
         self._set_last_action("開始索引", lambda: self._start_index(files, update_text, update_image))
         self._start_index(files, update_text, update_image)
 
+    def _on_prepare_scan_progress(self, payload: object) -> None:
+        try:
+            if not isinstance(payload, dict):
+                return
+            count = int(payload.get("count", 0))
+            self._prepare_scan_count = count
+            self.prog_label.setText(f"正在掃描並整理索引需求... 已掃描 {self._prepare_scan_count} 筆")
+        except Exception:
+            log.exception("更新索引準備進度失敗")
+
+    def _on_prepare_status_progress(self, payload: object) -> None:
+        try:
+            if not isinstance(payload, dict):
+                return
+            message = str(payload.get("message") or "").strip()
+            if message:
+                self.prog_label.setText(message)
+        except Exception:
+            log.exception("更新索引狀態整理進度失敗")
+
     def _run_migrate_legacy_files(self, files: List[Dict[str, Any]]) -> None:
         if not self.ctx:
             return
@@ -950,6 +1043,8 @@ class LibraryTab(QWidget):
             import traceback
 
             try:
+                if self._cancel_prepare:
+                    return {"ok": False, "cancelled": True}
                 store = ctx.store
                 app_state = store.load_app_state()
                 store.save_app_state(app_state)
@@ -959,6 +1054,8 @@ class LibraryTab(QWidget):
                 legacy_slides = legacy_index.get("slides", {}) if isinstance(legacy_index.get("slides"), dict) else {}
                 slide_pages: Dict[str, str] = {}
                 for slide_id, slide in legacy_slides.items():
+                    if self._cancel_prepare:
+                        return {"ok": False, "cancelled": True}
                     if not isinstance(slide_id, str) or not isinstance(slide, dict):
                         continue
                     slide_pages[slide_id] = str(slide.get("text_for_bm25") or "")
@@ -974,6 +1071,10 @@ class LibraryTab(QWidget):
         self.main_window.thread_pool.start(w)
 
     def _on_migrate_done(self, files: List[Dict[str, Any]], payload: object) -> None:
+        if isinstance(payload, dict) and payload.get("cancelled"):
+            self.prog_label.setText("已取消")
+            self._reset_prepare_ui()
+            return
         if not isinstance(payload, dict) or not payload.get("ok"):
             log.error("轉換舊版資料失敗\n%s", payload.get("traceback", "") if isinstance(payload, dict) else payload)
             QMessageBox.warning(self, "轉換失敗", "舊版資料轉換失敗，請查看 logs/ 了解詳細原因。")
@@ -993,6 +1094,8 @@ class LibraryTab(QWidget):
             import traceback
 
             try:
+                if self._cancel_prepare:
+                    return {"ok": False, "cancelled": True}
                 store = ctx.store
                 manifest = store.load_manifest()
                 entries = [e for e in manifest.get("files", []) if isinstance(e, dict)]
@@ -1004,6 +1107,8 @@ class LibraryTab(QWidget):
                     source_ts = int(datetime.datetime.now().timestamp())
                 updated = 0
                 for entry in entries:
+                    if self._cancel_prepare:
+                        return {"ok": False, "cancelled": True}
                     if not entry.get("indexed_at"):
                         entry["indexed_at"] = source_ts
                         updated += 1
@@ -1020,6 +1125,10 @@ class LibraryTab(QWidget):
         self.main_window.thread_pool.start(w)
 
     def _on_fill_done(self, files: List[Dict[str, Any]], payload: object) -> None:
+        if isinstance(payload, dict) and payload.get("cancelled"):
+            self.prog_label.setText("已取消")
+            self._reset_prepare_ui()
+            return
         if not isinstance(payload, dict) or not payload.get("ok"):
             log.error("補齊索引更新時間失敗\n%s", payload.get("traceback", "") if isinstance(payload, dict) else payload)
             QMessageBox.warning(self, "補齊失敗", "補齊索引更新時間失敗，請查看 logs/ 了解詳細原因。")
@@ -1145,6 +1254,8 @@ class LibraryTab(QWidget):
 
     def cancel_indexing(self) -> None:
         self._cancel_index = True
+        self._cancel_scan = True
+        self._cancel_prepare = True
         self.prog_label.setText("取消中...")
 
     def toggle_pause_indexing(self) -> None:
