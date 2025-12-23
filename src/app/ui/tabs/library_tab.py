@@ -730,9 +730,9 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
-        self._request_index_mode(files)
+        self._request_index_mode(files, scope_only=True)
 
-    def _request_index_mode(self, files: List[Dict[str, Any]]) -> None:
+    def _request_index_mode(self, files: List[Dict[str, Any]], scope_only: bool = False) -> None:
         if not self.ctx:
             return
         self._set_prepare_ui("正在整理索引狀態...")
@@ -745,20 +745,25 @@ class LibraryTab(QWidget):
                 store = ctx.store
                 paths = store.paths
                 manifest = store.load_manifest()
-                slide_pages = store.load_slide_pages()
+                slide_pages = [] if scope_only else store.load_slide_pages()
 
-                total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
                 scope_files = len(files)
-                indexed_files = sum(
-                    1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
-                )
+                if scope_only:
+                    total_files = scope_files
+                    indexed_files = sum(1 for e in files if isinstance(e, dict) and e.get("indexed"))
+                else:
+                    total_files = len([e for e in manifest.get("files", []) if isinstance(e, dict)])
+                    indexed_files = sum(
+                        1 for e in manifest.get("files", []) if isinstance(e, dict) and e.get("indexed")
+                    )
 
                 thumbs_count = 0
-                try:
-                    if paths.thumbs_dir.exists():
-                        thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
-                except Exception as exc:
-                    log.warning("讀取縮圖快取數量失敗：%s", exc)
+                if not scope_only:
+                    try:
+                        if paths.thumbs_dir.exists():
+                            thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
+                    except Exception as exc:
+                        log.warning("讀取縮圖快取數量失敗：%s", exc)
 
                 def fmt_time(ts: int | None) -> str:
                     if not ts:
@@ -791,11 +796,13 @@ class LibraryTab(QWidget):
 
                 fill_needed = False
 
+                slide_pages_summary = "略過" if scope_only else str(len(slide_pages))
+                thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
                 details = (
                     f"本次範圍：{scope_files} 個檔案\n"
                     f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
-                    f"投影片文字（slide_pages.json）：{len(slide_pages)}\n"
-                    f"縮圖快取：{thumbs_count} 張\n"
+                    f"投影片文字（slide_pages.json）：{slide_pages_summary}\n"
+                    f"縮圖快取：{thumbs_summary}\n"
                     "索引時間：以 manifest.json 的 indexed_at 為準"
                 )
 
