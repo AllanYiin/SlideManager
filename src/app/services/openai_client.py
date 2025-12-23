@@ -75,6 +75,8 @@ class OpenAIClient:
         embed_tpm = int(os.getenv("OPENAI_EMBED_TPM", "5000000") or 5000000)
         self._embed_rate_limiter = _RateLimiter(embed_rpm) if embed_rpm > 0 else None
         self._embed_token_limiter = _TokenRateLimiter(embed_tpm) if embed_tpm > 0 else None
+        self._timeout = float(os.getenv("OPENAI_TIMEOUT", "60") or 60)
+        log.debug("OpenAI timeout=%.2f", self._timeout)
 
     def embed_texts(self, texts: List[str], model: str, token_counts: Optional[List[int]] = None) -> List[List[float]]:
         """同步 embeddings（逐筆查詢）。"""
@@ -89,6 +91,7 @@ class OpenAIClient:
             resp = self._client.embeddings.create(
                 model=model,
                 input=text,
+                timeout=self._timeout,
             )
             item = (getattr(resp, "data", []) or [None])[0]
             emb = getattr(item, "embedding", None) if item else None
