@@ -216,6 +216,11 @@ class IndexService:
 
         slide_pages = self.store.load_slide_pages() if update_text else {}
         slide_pages_updates = 0
+        if update_text_vectors:
+            try:
+                self.embeddings.ensure_cache_file()
+            except Exception as exc:
+                log.warning("建立文字 embedding 快取檔失敗：%s", exc)
 
         def save_slide_pages(*, force: bool = False) -> None:
             nonlocal slide_pages_updates
@@ -666,6 +671,11 @@ class IndexService:
             "last_message": render_message,
         }
         self.store.save_manifest(manifest)
+
+        try:
+            self.store.ensure_vector_files(text=update_text, image=update_image)
+        except Exception as exc:
+            log.warning("建立向量檔案失敗：%s", exc)
 
         if text_vectors_written:
             try:
