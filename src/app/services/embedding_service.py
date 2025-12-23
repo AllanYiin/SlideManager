@@ -42,11 +42,11 @@ class EmbeddingService:
         self.cache_dir = cache_dir
         self._cache: Dict[str, List[float]] = {}
         self._cache_path = None
+        self._cache_loaded = False
         self._max_chars = int(os.getenv("OPENAI_EMBED_MAX_CHARS", "200000") or 200000)
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
             self._cache_path = cache_dir / "text_embedding_cache.json"
-            self._cache = self._load_cache()
 
     def has_openai(self) -> bool:
         return self._client is not None
@@ -62,6 +62,7 @@ class EmbeddingService:
             return []
         if not self._client:
             return [np.zeros((self.cfg.text_dim,), dtype=np.float32) for _ in texts]
+        self._ensure_cache_loaded()
         cleaned = [(t or "").strip() for t in texts]
         out: List[Optional[np.ndarray]] = [None] * len(cleaned)
         missing_texts: List[str] = []
@@ -139,6 +140,12 @@ class EmbeddingService:
         except Exception as exc:
             log.warning("讀取 embedding cache 失敗：%s", exc)
         return {}
+
+    def _ensure_cache_loaded(self) -> None:
+        if self._cache_loaded:
+            return
+        self._cache = self._load_cache()
+        self._cache_loaded = True
 
     def _save_cache(self) -> None:
         if not self._cache_path:
