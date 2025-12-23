@@ -240,6 +240,12 @@ class ProjectStore:
     def compact_image_vectors(self) -> None:
         self._compact_vectors(self.paths.vec_image_npz, self.paths.vec_image_delta_npz)
 
+    def ensure_vector_files(self, *, text: bool = False, image: bool = False) -> None:
+        if text and not self.paths.vec_text_npz.exists():
+            self._save_npz_map(self.paths.vec_text_npz, {})
+        if image and not self.paths.vec_image_npz.exists():
+            self._save_npz_map(self.paths.vec_image_npz, {})
+
     def _load_vectors(self, snapshot_path: Path, delta_path: Path) -> Dict[str, np.ndarray]:
         vectors = self._load_npz_map(snapshot_path)
         delta = self._load_npz_map(delta_path)
