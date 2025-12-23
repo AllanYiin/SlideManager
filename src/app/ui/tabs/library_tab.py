@@ -873,7 +873,13 @@ class LibraryTab(QWidget):
                 thumbs_count = 0
                 if not scope_only:
                     try:
-                        if paths.thumbs_dir.exists():
+                        if total_files == 0 and scope_files == 0:
+                            if _progress_emit:
+                                _progress_emit({"stage": "thumbs", "message": "縮圖快取：0 張"})
+                        elif indexed_files == 0:
+                            if _progress_emit:
+                                _progress_emit({"stage": "thumbs", "message": "縮圖快取：0 張"})
+                        elif paths.thumbs_dir.exists():
                             if _progress_emit:
                                 _progress_emit({"stage": "thumbs", "message": "正在統計縮圖快取..."})
                             for idx, thumb in enumerate(paths.thumbs_dir.rglob("*.png"), start=1):
