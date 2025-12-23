@@ -46,6 +46,8 @@ class EmbeddingService:
             cache_dir.mkdir(parents=True, exist_ok=True)
             self._cache_path = cache_dir / "text_embedding_cache.json"
             self._cache = self._load_cache()
+            if not self._cache_path.exists():
+                self._save_cache()
 
     def has_openai(self) -> bool:
         return self._client is not None

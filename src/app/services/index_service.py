@@ -165,6 +165,8 @@ class IndexService:
         render_pages = 0
         extract_time = 0.0
         render_time = 0.0
+        text_vectors_written = False
+        image_vectors_written = False
 
         def build_metrics() -> Dict[str, Any]:
             elapsed = time.perf_counter() - overall_start
@@ -511,6 +513,7 @@ class IndexService:
 
         if update_text and text_vectors_to_append:
             self.store.append_text_vectors(text_vectors_to_append)
+            text_vectors_written = True
 
         if update_image:
             self.renderer.begin_batch()
@@ -579,6 +582,7 @@ class IndexService:
                 }
                 if image_vectors_to_append:
                     self.store.append_image_vectors(image_vectors_to_append)
+                    image_vectors_written = True
 
         now = int(time.time())
         for fi, fd in enumerate(staged_files, start=1):
@@ -662,6 +666,17 @@ class IndexService:
             "last_message": render_message,
         }
         self.store.save_manifest(manifest)
+
+        if text_vectors_written:
+            try:
+                self.store.compact_text_vectors()
+            except Exception as exc:
+                log.warning("壓縮文字向量檔失敗：%s", exc)
+        if image_vectors_written:
+            try:
+                self.store.compact_image_vectors()
+            except Exception as exc:
+                log.warning("壓縮圖片向量檔失敗：%s", exc)
 
         progress("done", overall_total, overall_total, "索引完成")
         return 0, f"已索引 {total_files} 個檔案"
