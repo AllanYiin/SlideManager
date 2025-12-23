@@ -158,6 +158,13 @@ class IndexService:
         """索引指定檔案（依新規格：先文字、後圖片）。"""
 
         overall_start = time.perf_counter()
+        log.info(
+            "[INDEX_SCOPE][SVC] files_count=%d files=%s",
+            len(files),
+            [(f.get("file_id"), f.get("abs_path")) for f in files],
+        )
+        if len(files) == 0:
+            return 1, "沒有可索引檔案"
         update_text_vectors = bool(update_text and self.embeddings.has_openai())
         update_image_vectors = bool(update_image and self.image_embedder.enabled_onnx())
         processed_pages = 0

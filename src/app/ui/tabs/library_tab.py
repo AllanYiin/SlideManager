@@ -746,6 +746,17 @@ class LibraryTab(QWidget):
                 path = entry.get("abs_path")
                 if path and path in selected_set:
                     selected.append(entry)
+            log.info("[INDEX_SCOPE][UI] selected_paths=%s", selected_paths)
+            log.info(
+                "[INDEX_SCOPE][UI] resolved_selected_files=%s",
+                [(e.get("file_id"), e.get("abs_path")) for e in selected],
+            )
+            if len(selected) != len(selected_paths):
+                missing_paths = [p for p in selected_paths if p and p not in {e.get("abs_path") for e in selected}]
+                log.warning(
+                    "[INDEX_SCOPE][UI] unmatched_selected_paths=%s",
+                    missing_paths,
+                )
             return selected
 
         w = Worker(task)
@@ -758,10 +769,37 @@ class LibraryTab(QWidget):
             self._reset_prepare_ui()
             QMessageBox.information(self, "未選取", "找不到選取的檔案，請重新選取後再試")
             return
+        log.info(
+            "[INDEX_SCOPE][UI] scope_only=True files_count=%d files=%s",
+            len(files),
+            [(f.get("file_id"), f.get("abs_path")) for f in files],
+        )
         self._request_index_mode(files, scope_only=True)
 
     def _request_index_mode(self, files: List[Dict[str, Any]], scope_only: bool = False) -> None:
         if not self.ctx:
+            return
+        if scope_only and (not files or any(not f.get("file_id") for f in files)):
+            file_names = []
+            for entry in files or []:
+                path = entry.get("abs_path")
+                if path:
+                    file_names.append(Path(path).name)
+            shown_names = "、".join(file_names[:20]) if file_names else "（無）"
+            if len(file_names) > 20:
+                shown_names += "…"
+            log.error(
+                "[INDEX_SCOPE][UI] scope_only files invalid: files=%s",
+                [(f.get("file_id"), f.get("abs_path")) for f in files or []],
+            )
+            QMessageBox.warning(
+                self,
+                "索引範圍異常",
+                f"選取檔案資料異常，已取消本次索引。\n"
+                f"本次 scope 檔案數：{len(files) if files else 0}\n"
+                f"檔名清單：{shown_names}",
+            )
+            self._reset_prepare_ui()
             return
         self._set_prepare_ui("正在整理索引狀態...")
         ctx = self.ctx
@@ -826,8 +864,20 @@ class LibraryTab(QWidget):
 
                 slide_pages_summary = "略過" if scope_only else str(len(slide_pages))
                 thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
+                scope_file_names = []
+                for entry in files:
+                    if not isinstance(entry, dict):
+                        continue
+                    path = entry.get("abs_path")
+                    if path:
+                        scope_file_names.append(Path(path).name)
+                scope_names_display = "、".join(scope_file_names[:20]) if scope_file_names else "（無）"
+                if len(scope_file_names) > 20:
+                    scope_names_display += "…"
+
                 details = (
                     f"本次範圍：{scope_files} 個檔案\n"
+                    f"檔名清單：{scope_names_display}\n"
                     f"已掃描檔案：{total_files} 個 | 已標記索引：{indexed_files} 個\n"
                     f"投影片文字（slide_pages.json）：{slide_pages_summary}\n"
                     f"縮圖快取：{thumbs_summary}\n"
