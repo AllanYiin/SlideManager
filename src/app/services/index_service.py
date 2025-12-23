@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -21,6 +22,11 @@ from app.services.render_service import RenderService
 from app.utils.text import tokenize
 
 log = get_logger(__name__)
+
+TEXT_EMBED_BATCH_SIZE = int(os.getenv("TEXT_EMBED_BATCH_SIZE", "32") or 32)
+TEXT_EMBED_PROGRESS_EVERY = 1
+IMAGE_EMBED_BATCH_SIZE = int(os.getenv("IMAGE_EMBED_BATCH_SIZE", "16") or 16)
+IMAGE_EMBED_PROGRESS_EVERY = 1
 
 
 @dataclass
@@ -440,7 +446,6 @@ class IndexService:
                 slide.index = len(all_slides)
                 all_slides.append(slide)
 
-        text_vectors_to_append: Dict[str, np.ndarray] = {}
         bm25_indices: List[int] = []
         bm25_payload: List[str] = []
         embed_indices: List[int] = []
@@ -472,22 +477,49 @@ class IndexService:
                 )
                 bm25_future = executor.submit(lambda: [tokenize(t) for t in bm25_payload])
 
-            text_vecs: List[np.ndarray] = []
             if update_text_vectors and embed_payload:
-                progress(
-                    "embed_text",
-                    text_progress or total_files,
-                    overall_total,
-                    "產生文字向量中...",
-                )
-                try:
-                    text_vecs = self.embeddings.embed_text_batch(embed_payload)
-                except EmbeddingError as exc:
-                    msg = format_user_message(ErrorCode.OPENAI_ERROR, detail=str(exc))
-                    for fd in staged_files:
-                        self.catalog.mark_index_error(fd.abs_path, ErrorCode.OPENAI_ERROR.value, msg)
-                    log.error("[OPENAI_ERROR] 文字向量建立失敗：%s", exc)
-                    raise
+                total = len(embed_payload)
+                vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
+                zero_vec = np.zeros(self.emb_cfg.text_dim, dtype=vec_dtype)
+                for batch_start in range(0, total, TEXT_EMBED_BATCH_SIZE):
+                    if cancel_flag and cancel_flag():
+                        return 1, "已取消"
+                    batch_texts = embed_payload[batch_start : batch_start + TEXT_EMBED_BATCH_SIZE]
+                    batch_indices = embed_indices[batch_start : batch_start + TEXT_EMBED_BATCH_SIZE]
+                    if TEXT_EMBED_PROGRESS_EVERY > 0:
+                        progress(
+                            "embed_text",
+                            text_progress or total_files,
+                            overall_total,
+                            f"產生文字向量中... {batch_start}/{total}",
+                        )
+                    try:
+                        batch_vecs = self.embeddings.embed_text_batch(batch_texts)
+                    except EmbeddingError as exc:
+                        msg = format_user_message(ErrorCode.OPENAI_ERROR, detail=str(exc))
+                        for fd in staged_files:
+                            self.catalog.mark_index_error(fd.abs_path, ErrorCode.OPENAI_ERROR.value, msg)
+                        log.error("[OPENAI_ERROR] 文字向量建立失敗：%s", exc)
+                        raise
+                    batch_to_append: Dict[str, np.ndarray] = {}
+                    for idx, slide_idx in enumerate(batch_indices):
+                        slide = all_slides[slide_idx]
+                        slide_id = f"{slide.file_entry.get('file_id')}#{slide.page}"
+                        if idx < len(batch_vecs) and batch_vecs[idx] is not None:
+                            vec = np.asarray(batch_vecs[idx], dtype=vec_dtype)
+                        else:
+                            vec = zero_vec
+                        batch_to_append[slide_id] = vec
+                    if batch_to_append:
+                        self.store.append_text_vectors(batch_to_append)
+                        text_vectors_written = True
+                    if TEXT_EMBED_PROGRESS_EVERY > 0:
+                        progress(
+                            "embed_text_write",
+                            text_progress or total_files,
+                            overall_total,
+                            f"已寫入文字向量... {min(batch_start + TEXT_EMBED_BATCH_SIZE, total)}/{total}",
+                        )
             elif update_text:
                 if not embed_payload:
                     progress(
@@ -514,18 +546,6 @@ class IndexService:
 
         if cancel_flag and cancel_flag():
             return 1, "已取消"
-
-        for idx, slide_idx in enumerate(embed_indices):
-            slide = all_slides[slide_idx]
-            slide_id = f"{slide.file_entry.get('file_id')}#{slide.page}"
-            if idx < len(text_vecs):
-                vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
-                vec = np.asarray(text_vecs[idx], dtype=vec_dtype)
-                text_vectors_to_append[slide_id] = vec
-
-        if update_text and text_vectors_to_append:
-            self.store.append_text_vectors(text_vectors_to_append)
-            text_vectors_written = True
 
         if update_image:
             self.renderer.begin_batch()
@@ -572,29 +592,47 @@ class IndexService:
                 self.renderer.end_batch()
 
             if update_image_vectors and image_paths:
-                progress(
-                    "embed_image_start",
-                    total_files + stage2_units,
-                    overall_total,
-                    "批次產生圖片向量中...",
-                )
-                try:
-                    image_vecs = self.image_embedder.embed_images(
-                        image_paths,
-                        dim=self.emb_cfg.image_dim,
-                        batch_size=16,
-                    )
-                except Exception as exc:
-                    log.warning("圖片向量批次產生失敗：%s", exc)
-                    image_vecs = np.zeros((len(image_paths), self.emb_cfg.image_dim), dtype=np.float32)
+                total = len(image_paths)
                 image_vec_dtype = np.float16 if hasattr(np, "float16") else np.float32
-                image_vectors_to_append = {
-                    slide_id: np.asarray(vec, dtype=image_vec_dtype)
-                    for slide_id, vec in zip(image_slide_ids, image_vecs)
-                }
-                if image_vectors_to_append:
-                    self.store.append_image_vectors(image_vectors_to_append)
-                    image_vectors_written = True
+                zero_vec = np.zeros(self.emb_cfg.image_dim, dtype=image_vec_dtype)
+                for batch_start in range(0, total, IMAGE_EMBED_BATCH_SIZE):
+                    if cancel_flag and cancel_flag():
+                        return 1, "已取消"
+                    batch_paths = image_paths[batch_start : batch_start + IMAGE_EMBED_BATCH_SIZE]
+                    batch_ids = image_slide_ids[batch_start : batch_start + IMAGE_EMBED_BATCH_SIZE]
+                    if IMAGE_EMBED_PROGRESS_EVERY > 0:
+                        progress(
+                            "embed_image",
+                            total_files + stage2_units,
+                            overall_total,
+                            f"產生圖片向量中... {batch_start}/{total}",
+                        )
+                    try:
+                        batch_vecs = self.image_embedder.embed_images(
+                            batch_paths,
+                            dim=self.emb_cfg.image_dim,
+                            batch_size=IMAGE_EMBED_BATCH_SIZE,
+                        )
+                    except Exception as exc:
+                        log.warning("圖片向量批次產生失敗：%s", exc)
+                        batch_vecs = np.zeros((len(batch_paths), self.emb_cfg.image_dim), dtype=np.float32)
+                    batch_vectors_to_append: Dict[str, np.ndarray] = {}
+                    for idx, slide_id in enumerate(batch_ids):
+                        if idx < len(batch_vecs) and batch_vecs[idx] is not None:
+                            vec = np.asarray(batch_vecs[idx], dtype=image_vec_dtype)
+                        else:
+                            vec = zero_vec
+                        batch_vectors_to_append[slide_id] = vec
+                    if batch_vectors_to_append:
+                        self.store.append_image_vectors(batch_vectors_to_append)
+                        image_vectors_written = True
+                    if IMAGE_EMBED_PROGRESS_EVERY > 0:
+                        progress(
+                            "embed_image_write",
+                            total_files + stage2_units,
+                            overall_total,
+                            f"已寫入圖片向量... {min(batch_start + IMAGE_EMBED_BATCH_SIZE, total)}/{total}",
+                        )
 
         now = int(time.time())
         for fi, fd in enumerate(staged_files, start=1):
