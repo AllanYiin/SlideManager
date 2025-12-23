@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -79,11 +80,40 @@ class EmbeddingService:
             missing_indices.append(i)
 
         if missing_texts and self._client:
-            for t, pos in zip(missing_texts, missing_indices):
-                vec = self._fetch_embedding_with_retry(t)
-                v = self._align_dim(np.asarray(vec, dtype=np.float32))
-                out[pos] = normalize_l2(v)
-                self._cache[self._cache_key(t)] = self._to_cache_list(v)
+            max_workers = int(os.getenv("OPENAI_EMBED_WORKERS", "4") or 4)
+            max_workers = max(1, max_workers)
+
+            def worker(text: str) -> Optional[List[float]]:
+                try:
+                    return self._fetch_embedding_with_retry(text)
+                except Exception as exc:
+                    log.warning("OpenAI embedding 失敗：%s", exc)
+                    return None
+
+            if max_workers > 1 and len(missing_texts) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {
+                        executor.submit(worker, text): (text, pos)
+                        for text, pos in zip(missing_texts, missing_indices)
+                    }
+                    for future in concurrent.futures.as_completed(future_map):
+                        text, pos = future_map[future]
+                        vec = future.result()
+                        if vec is None:
+                            out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
+                            continue
+                        v = self._align_dim(np.asarray(vec, dtype=np.float32))
+                        out[pos] = normalize_l2(v)
+                        self._cache[self._cache_key(text)] = self._to_cache_list(v)
+            else:
+                for t, pos in zip(missing_texts, missing_indices):
+                    vec = worker(t)
+                    if vec is None:
+                        out[pos] = np.zeros((self.cfg.text_dim,), dtype=np.float32)
+                        continue
+                    v = self._align_dim(np.asarray(vec, dtype=np.float32))
+                    out[pos] = normalize_l2(v)
+                    self._cache[self._cache_key(t)] = self._to_cache_list(v)
             self._save_cache()
 
         for i, t in enumerate(cleaned):
