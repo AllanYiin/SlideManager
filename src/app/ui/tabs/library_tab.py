@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
@@ -71,8 +71,8 @@ class LibraryTab(QWidget):
 
         self._metrics_timer.timeout.connect(self._flush_metrics_refresh)
         self._indexing_active = False
-        self._cached_text_vectors: Dict[str, Any] = {}
-        self._cached_image_vectors: Dict[str, Any] = {}
+        self._cached_text_vector_keys: Set[str] = set()
+        self._cached_image_vector_keys: Set[str] = set()
         self._vectors_loaded = False
         self._vector_mtimes = {
             "text": None,
@@ -359,8 +359,8 @@ class LibraryTab(QWidget):
             return
         self._table_refresh_inflight = True
         ctx = self.ctx
-        cached_text_vectors = self._cached_text_vectors
-        cached_image_vectors = self._cached_image_vectors
+        cached_text_vector_keys = self._cached_text_vector_keys
+        cached_image_vector_keys = self._cached_image_vector_keys
         vectors_loaded = self._vectors_loaded
         vector_mtimes = dict(self._vector_mtimes)
 
@@ -378,11 +378,11 @@ class LibraryTab(QWidget):
                     "image_delta": paths.vec_image_delta_npz.stat().st_mtime if paths.vec_image_delta_npz.exists() else None,
                 }
                 if not vectors_loaded or current_mtimes != vector_mtimes:
-                    text_vectors = ctx.store.load_text_vectors()
-                    image_vectors = ctx.store.load_image_vectors()
+                    text_vector_keys = ctx.store.load_text_vector_keys()
+                    image_vector_keys = ctx.store.load_image_vector_keys()
                 else:
-                    text_vectors = cached_text_vectors
-                    image_vectors = cached_image_vectors
+                    text_vector_keys = cached_text_vector_keys
+                    image_vector_keys = cached_image_vector_keys
                 slides_by_file_id: Dict[str, List[Dict[str, Any]]] = {}
                 for slide_id, text in slide_pages.items():
                     if not isinstance(slide_id, str):
@@ -400,9 +400,9 @@ class LibraryTab(QWidget):
                     flags = {
                         "has_text": bool(text_value.strip()),
                         "has_bm25": bool(text_value.strip()),
-                        "has_text_vec": slide_id in text_vectors,
+                        "has_text_vec": slide_id in text_vector_keys,
                         "has_image": has_image,
-                        "has_image_vec": slide_id in image_vectors,
+                        "has_image_vec": slide_id in image_vector_keys,
                     }
                     slide_entry = {
                         "slide_id": slide_id,
@@ -417,8 +417,8 @@ class LibraryTab(QWidget):
                     "ok": True,
                     "files": files,
                     "slides_by_file_id": slides_by_file_id,
-                    "text_vectors": text_vectors,
-                    "image_vectors": image_vectors,
+                    "text_vector_keys": text_vector_keys,
+                    "image_vector_keys": image_vector_keys,
                     "vector_mtimes": current_mtimes,
                 }
             except Exception as exc:
@@ -453,8 +453,8 @@ class LibraryTab(QWidget):
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast("載入檔案清單失敗，已寫入 logs/app.log。", level="error")
             return
-        self._cached_text_vectors = payload.get("text_vectors", {})
-        self._cached_image_vectors = payload.get("image_vectors", {})
+        self._cached_text_vector_keys = payload.get("text_vector_keys", set())
+        self._cached_image_vector_keys = payload.get("image_vector_keys", set())
         self._vector_mtimes = payload.get("vector_mtimes", self._vector_mtimes)
         self._vectors_loaded = True
         self._slides_by_file_id = payload.get("slides_by_file_id", {})
@@ -1085,8 +1085,8 @@ class LibraryTab(QWidget):
         self.btn_index_needed.setEnabled(True)
         self.btn_index_selected.setEnabled(True)
         self._vectors_loaded = False
-        self._cached_text_vectors = {}
-        self._cached_image_vectors = {}
+        self._cached_text_vector_keys = set()
+        self._cached_image_vector_keys = set()
         self.refresh_table()
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):

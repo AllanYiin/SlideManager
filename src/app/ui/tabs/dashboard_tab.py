@@ -219,9 +219,14 @@ class DashboardTab(QWidget):
                 catalog = ctx.store.load_manifest()
                 files = [e for e in catalog.get("files", []) if isinstance(e, dict)]
                 slide_pages = ctx.store.load_slide_pages()
-                text_vectors = ctx.store.load_text_vectors()
-                image_vectors = ctx.store.load_image_vectors()
-                metrics = self._compute_metrics_from_data(files, slide_pages, text_vectors, image_vectors)
+                text_vector_keys = ctx.store.load_text_vector_keys()
+                image_vector_keys = ctx.store.load_image_vector_keys()
+                metrics = self._compute_metrics_from_data(
+                    files,
+                    slide_pages,
+                    text_vector_keys,
+                    image_vector_keys,
+                )
                 return {"ok": True, "metrics": metrics}
             except Exception as exc:
                 return {
@@ -270,8 +275,8 @@ class DashboardTab(QWidget):
         self,
         files: List[Dict[str, Any]],
         slide_pages: Dict[str, str],
-        text_vectors: Dict[str, Any],
-        image_vectors: Dict[str, Any],
+        text_vector_keys: set[str],
+        image_vector_keys: set[str],
     ) -> DashboardMetrics:
         slides = []
         for slide_id, text in slide_pages.items():
@@ -287,9 +292,9 @@ class DashboardTab(QWidget):
             flags = {
                 "has_text": bool(text_value.strip()),
                 "has_bm25": bool(text_value.strip()),
-                "has_text_vec": slide_id in text_vectors,
+                "has_text_vec": slide_id in text_vector_keys,
                 "has_image": bool(thumb_path and thumb_path.exists()),
-                "has_image_vec": slide_id in image_vectors,
+                "has_image_vec": slide_id in image_vector_keys,
             }
             slides.append(
                 {
