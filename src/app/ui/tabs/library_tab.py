@@ -843,15 +843,21 @@ class LibraryTab(QWidget):
         self._set_prepare_ui("正在整理索引狀態...")
         ctx = self.ctx
 
-        def task():
+        def task(_progress_emit):
             import traceback
 
             try:
                 if self._cancel_prepare:
                     return {"ok": False, "cancelled": True}
+
+                if _progress_emit:
+                    _progress_emit({"stage": "manifest", "message": "正在讀取索引清單..."})
+
                 store = ctx.store
                 paths = store.paths
                 manifest = store.load_manifest()
+                if _progress_emit and not scope_only:
+                    _progress_emit({"stage": "slide_pages", "message": "正在讀取投影片文字索引..."})
                 slide_pages = [] if scope_only else store.load_slide_pages()
 
                 scope_files = len(files)
@@ -868,7 +874,20 @@ class LibraryTab(QWidget):
                 if not scope_only:
                     try:
                         if paths.thumbs_dir.exists():
-                            thumbs_count = sum(1 for _ in paths.thumbs_dir.rglob("*.png") if _.is_file())
+                            if _progress_emit:
+                                _progress_emit({"stage": "thumbs", "message": "正在統計縮圖快取..."})
+                            for idx, thumb in enumerate(paths.thumbs_dir.rglob("*.png"), start=1):
+                                if self._cancel_prepare:
+                                    return {"ok": False, "cancelled": True}
+                                if thumb.is_file():
+                                    thumbs_count += 1
+                                if _progress_emit and idx % 50 == 0:
+                                    _progress_emit(
+                                        {
+                                            "stage": "thumbs",
+                                            "message": f"正在統計縮圖快取... 已掃描 {idx} 筆",
+                                        }
+                                    )
                     except Exception as exc:
                         log.warning("讀取縮圖快取數量失敗：%s", exc)
 
@@ -906,7 +925,9 @@ class LibraryTab(QWidget):
                 slide_pages_summary = "略過" if scope_only else str(len(slide_pages))
                 thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
                 scope_file_names = []
-                for entry in files:
+
+                for idx, entry in enumerate(files, start=1):
+
                     if self._cancel_prepare:
                         return {"ok": False, "cancelled": True}
                     if not isinstance(entry, dict):
@@ -914,6 +935,13 @@ class LibraryTab(QWidget):
                     path = entry.get("abs_path")
                     if path:
                         scope_file_names.append(Path(path).name)
+                    if _progress_emit and idx % 50 == 0:
+                        _progress_emit(
+                            {
+                                "stage": "scope",
+                                "message": f"正在整理檔案清單... 已處理 {idx} 筆",
+                            }
+                        )
                 scope_names_display = "、".join(scope_file_names[:20]) if scope_file_names else "（無）"
                 if len(scope_file_names) > 20:
                     scope_names_display += "…"
@@ -959,6 +987,8 @@ class LibraryTab(QWidget):
                 }
 
         w = Worker(task)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_prepare_status_progress)
         w.signals.finished.connect(lambda payload: self._on_index_status_ready(files, payload))
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
@@ -995,6 +1025,18 @@ class LibraryTab(QWidget):
             self.prog_label.setText(f"正在掃描並整理索引需求... 已掃描 {self._prepare_scan_count} 筆")
         except Exception:
             log.exception("更新索引準備進度失敗")
+
+
+    def _on_prepare_status_progress(self, payload: object) -> None:
+        try:
+            if not isinstance(payload, dict):
+                return
+            message = str(payload.get("message") or "").strip()
+            if message:
+                self.prog_label.setText(message)
+        except Exception:
+            log.exception("更新索引狀態整理進度失敗")
+
 
     def _run_migrate_legacy_files(self, files: List[Dict[str, Any]]) -> None:
         if not self.ctx:
