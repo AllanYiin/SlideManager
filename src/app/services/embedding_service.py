@@ -56,6 +56,10 @@ class EmbeddingService:
         if not self._cache_path:
             return
         if not self._cache_path.exists():
+            if not self._cache_loaded:
+                self._cache = self._load_cache()
+                self._cache_loaded = True
+            self._save_cache()
 
 
     def has_openai(self) -> bool:
