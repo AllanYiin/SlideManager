@@ -601,13 +601,17 @@ class LibraryTab(QWidget):
     def _choose_index_mode(self, files: List[Dict[str, Any]]) -> tuple[bool, bool] | None:
         details = self._index_status_payload.get("details", "")
         detail_long = self._index_status_payload.get("detail_long", "")
-        legacy_needed = bool(self._index_status_payload.get("legacy_needed"))
-        fill_needed = bool(self._index_status_payload.get("fill_needed"))
+        scope_only = bool(self._index_status_payload.get("scope_only"))
+        legacy_needed = bool(self._index_status_payload.get("legacy_needed")) and not scope_only
+        fill_needed = bool(self._index_status_payload.get("fill_needed")) and not scope_only
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Question)
         box.setWindowTitle("選擇索引類型")
-        box.setText("請選擇要更新的索引類型：")
+        if scope_only:
+            box.setText("請選擇要更新的索引類型（僅限選取檔案）：")
+        else:
+            box.setText("請選擇要更新的索引類型：")
 
         if details:
             box.setInformativeText(details)
@@ -707,16 +711,16 @@ class LibraryTab(QWidget):
     def _prepare_index_selected(self, selected_paths: List[str]) -> None:
         if not self.ctx:
             return
-        self._set_prepare_ui("正在掃描並整理選取檔案...")
+        self._set_prepare_ui("正在整理選取檔案...")
 
         def task():
-            self.ctx.catalog.scan()
             cat = self.ctx.store.load_manifest()
             files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+            selected_set = {p for p in selected_paths if p}
             selected = []
             for entry in files:
                 path = entry.get("abs_path")
-                if path and path in selected_paths:
+                if path and path in selected_set:
                     selected.append(entry)
             return selected
 
@@ -828,6 +832,7 @@ class LibraryTab(QWidget):
                     "detail_long": "\n".join(detail_long_lines),
                     "legacy_needed": legacy_needed,
                     "fill_needed": fill_needed,
+                    "scope_only": scope_only,
                 }
             except Exception as exc:
                 return {
