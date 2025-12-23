@@ -720,7 +720,7 @@ class LibraryTab(QWidget):
                     selected.append(entry)
             return selected
 
-        w = Worker(task, None)
+        w = Worker(task)
         w.signals.finished.connect(self._on_prepare_index_selected_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
