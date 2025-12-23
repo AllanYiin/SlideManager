@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import importlib
 import os
 import shutil
 import subprocess
@@ -96,7 +97,7 @@ class LibreOfficeListener:
             self._process = None
 
     def _connect(self):
-        import uno
+        uno = importlib.import_module("uno")
 
         local_ctx = uno.getComponentContext()
         resolver = local_ctx.ServiceManager.createInstanceWithContext(
@@ -115,7 +116,8 @@ class LibreOfficeListener:
         raise RuntimeError("LibreOffice UNO 連線失敗") from last_error
 
     def convert_to_pdf(self, pptx_path: Path, pdf_path: Path) -> None:
-        from com.sun.star.beans import PropertyValue
+        beans = importlib.import_module("com.sun.star.beans")
+        PropertyValue = getattr(beans, "PropertyValue")
 
         self.start()
         ctx = self._connect()
