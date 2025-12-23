@@ -63,13 +63,14 @@ class LibraryTab(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
 
-        self._refresh_timer.setInterval(2000)
+        self._refresh_timer.setInterval(250)
         self._refresh_timer.timeout.connect(self._flush_table_refresh)
         self._metrics_timer = QTimer(self)
         self._metrics_timer.setSingleShot(True)
         self._metrics_timer.setInterval(10000)
 
         self._metrics_timer.timeout.connect(self._flush_metrics_refresh)
+        self._scan_in_progress = False
         self._indexing_active = False
         self._cached_text_vector_keys: Set[str] = set()
         self._cached_image_vector_keys: Set[str] = set()
@@ -81,6 +82,9 @@ class LibraryTab(QWidget):
             "image_delta": None,
         }
         self._table_refresh_inflight = False
+        self._table_fill_job_id = 0
+        self._table_fill_cursor = 0
+        self._table_fill_files: List[Dict[str, Any]] = []
         self._cached_files: List[Dict[str, Any]] = []
         self._index_status_payload: Dict[str, Any] = {}
         self._index_action_inflight = False
@@ -279,6 +283,7 @@ class LibraryTab(QWidget):
         self._set_last_action("掃描檔案", self.scan_files)
         self.prog_label.setText("掃描中...")
         self.prog.setRange(0, 0)
+        self._scan_in_progress = True
         self._scan_files_cache = []
         self._scan_count = 0
         self._meta_files: Dict[str, Any] = {}
@@ -304,7 +309,9 @@ class LibraryTab(QWidget):
                 self._scan_files_cache.extend(batch)
             self._scan_count = count
             self.prog_label.setText(f"掃描中... 已掃描 {self._scan_count} 筆")
-            self._refresh_table_with_files(self._scan_files_cache)
+            self._pending_table_refresh = True
+            if not self._refresh_timer.isActive():
+                self._refresh_timer.start()
         except Exception:
             log.exception("更新掃描進度失敗")
 
@@ -312,6 +319,7 @@ class LibraryTab(QWidget):
         self.prog.setRange(0, 100)
         self.prog.setValue(0)
         self.prog_label.setText("掃描完成")
+        self._scan_in_progress = False
         self._scan_files_cache = []
         self._scan_count = 0
         self.refresh_table()
@@ -486,16 +494,32 @@ class LibraryTab(QWidget):
         if coverage_filter:
             files = [f for f in files if self._match_coverage_filter(f, coverage_filter)]
 
-        sorting_enabled = self.table.isSortingEnabled()
-        if sorting_enabled:
-            self.table.setSortingEnabled(False)
+        self._table_fill_job_id += 1
+        job_id = self._table_fill_job_id
+        self._table_fill_files = list(files)
+        self._table_fill_cursor = 0
+        self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(files))
-        for r, f in enumerate(files):
-            self._set_row(r, f)
-        if sorting_enabled:
-            self.table.setSortingEnabled(True)
-            header = self.table.horizontalHeader()
-            self.table.sortItems(header.sortIndicatorSection(), header.sortIndicatorOrder())
+        QTimer.singleShot(0, lambda: self._fill_table_chunk(job_id))
+
+    def _fill_table_chunk(self, job_id: int) -> None:
+        if job_id != self._table_fill_job_id:
+            return
+        files = self._table_fill_files
+        cursor = self._table_fill_cursor
+        chunk_size = 100
+        end = min(cursor + chunk_size, len(files))
+        for i in range(cursor, end):
+            self._set_row(i, files[i])
+        self._table_fill_cursor = end
+        if end < len(files):
+            QTimer.singleShot(0, lambda: self._fill_table_chunk(job_id))
+            return
+        self.table.setUpdatesEnabled(True)
+        self.table.setSortingEnabled(True)
+        header = self.table.horizontalHeader()
+        self.table.sortItems(header.sortIndicatorSection(), header.sortIndicatorOrder())
 
     def _set_row(self, r: int, f: Dict[str, Any]) -> None:
         path = f.get("abs_path") or f.get("file_path") or f.get("path") or ""
@@ -1144,7 +1168,10 @@ class LibraryTab(QWidget):
 
     def _flush_table_refresh(self) -> None:
         if self._pending_table_refresh:
-            self.refresh_table()
+            if self._scan_in_progress and self._scan_files_cache:
+                self._refresh_table_with_files(self._scan_files_cache)
+            else:
+                self.refresh_table()
         self._pending_table_refresh = False
 
     def _flush_metrics_refresh(self) -> None:
