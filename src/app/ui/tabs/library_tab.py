@@ -849,8 +849,10 @@ class LibraryTab(QWidget):
             try:
                 if self._cancel_prepare:
                     return {"ok": False, "cancelled": True}
+
                 if _progress_emit:
                     _progress_emit({"stage": "manifest", "message": "正在讀取索引清單..."})
+
                 store = ctx.store
                 paths = store.paths
                 manifest = store.load_manifest()
@@ -923,7 +925,9 @@ class LibraryTab(QWidget):
                 slide_pages_summary = "略過" if scope_only else str(len(slide_pages))
                 thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
                 scope_file_names = []
+
                 for idx, entry in enumerate(files, start=1):
+
                     if self._cancel_prepare:
                         return {"ok": False, "cancelled": True}
                     if not isinstance(entry, dict):
@@ -1022,6 +1026,7 @@ class LibraryTab(QWidget):
         except Exception:
             log.exception("更新索引準備進度失敗")
 
+
     def _on_prepare_status_progress(self, payload: object) -> None:
         try:
             if not isinstance(payload, dict):
@@ -1031,6 +1036,7 @@ class LibraryTab(QWidget):
                 self.prog_label.setText(message)
         except Exception:
             log.exception("更新索引狀態整理進度失敗")
+
 
     def _run_migrate_legacy_files(self, files: List[Dict[str, Any]]) -> None:
         if not self.ctx:
