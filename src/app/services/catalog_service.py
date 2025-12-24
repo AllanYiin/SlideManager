@@ -10,9 +10,24 @@ from typing import Any, Dict, List, Optional, Callable
 
 from app.core.logging import get_logger
 from app.services.project_store import ProjectStore
-from app.services.metadata_service import read_pptx_metadata
 
 log = get_logger(__name__)
+
+
+def _read_pptx_metadata(path: Path) -> Dict[str, Any]:
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(path) as zf:
+            slide_count = sum(
+                1
+                for n in zf.namelist()
+                if n.startswith("ppt/slides/slide") and n.endswith(".xml")
+            )
+        return {"slide_count": slide_count, "core_properties": {}}
+    except Exception as exc:
+        log.warning("讀取 metadata 失敗：%s (%s)", path, exc)
+        return {"slide_count": None, "core_properties": {}}
 
 _SKIP_DIR_NAMES = {
     "appdata",
@@ -199,7 +214,7 @@ class CatalogService:
                             slide_count = None
                         if core_props is None or slide_count is None:
                             try:
-                                meta = read_pptx_metadata(path)
+                                meta = _read_pptx_metadata(path)
                                 core_props = meta.get("core_properties")
                                 slide_count = meta.get("slide_count")
                             except Exception as e:

@@ -135,22 +135,10 @@ class SettingsTab(QWidget):
         self._set_test_busy(True)
 
         def task():
-            import traceback
-
-            try:
-                from app.services.openai_client import OpenAIClient
-
-                c = OpenAIClient(key)
-                vecs = c.embed_texts(["test"], model="text-embedding-3-small")
-                if vecs and len(vecs[0]) > 0:
-                    return {"ok": True, "dim": len(vecs[0])}
-                return {"ok": False, "message": "未取得向量，請檢查 Key/網路"}
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "message": f"測試失敗：{exc}",
-                    "traceback": traceback.format_exc(),
-                }
+            return {
+                "ok": True,
+                "message": "已儲存 API Key，後台 daemon 會使用環境變數讀取。",
+            }
 
         w = Worker(task)
         w.signals.finished.connect(self._on_test_done)
@@ -178,8 +166,8 @@ class SettingsTab(QWidget):
             QMessageBox.critical(self, "測試失敗", "測試失敗，請稍後再試")
             return
         if payload.get("ok"):
-            dim = payload.get("dim", 0)
-            QMessageBox.information(self, "測試成功", f"已取得向量維度：{dim}")
+            msg = payload.get("message") or "API Key 已儲存"
+            QMessageBox.information(self, "測試成功", msg)
             return
         tb = payload.get("traceback", "")
         if tb:
@@ -222,8 +210,7 @@ class SettingsTab(QWidget):
             lines.append(f"Windows COM：{status_map.get('windows_com')}")
             model_status = self.ctx.indexer.image_embedder.status()
             lines.append(f"ONNX 啟用：{'是' if self.ctx.indexer.image_embedder.enabled_onnx() else '否（未啟用）'}")
-            lines.append(f"圖片模型版本：{model_status.version}")
-            lines.append(f"圖片模型狀態：{model_status.detail}")
+            lines.append(f"圖片模型狀態：{model_status.get('last_message')}")
             lines.append("")
             lines.append("提示：若未設定 API Key，向量搜尋會停用，僅提供 BM25 文字搜尋。")
 
