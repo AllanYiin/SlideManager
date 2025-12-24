@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from enum import StrEnum
+import enum
+
+if hasattr(enum, "StrEnum"):
+    StrEnum = enum.StrEnum
+else:
+
+    class StrEnum(str, enum.Enum):
+        pass
 
 
 class ArtifactKind(StrEnum):
