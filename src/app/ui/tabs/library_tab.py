@@ -92,6 +92,17 @@ class LibraryTab(QWidget):
         self._cached_files: List[Dict[str, Any]] = []
         self._index_status_payload: Dict[str, Any] = {}
         self._index_action_inflight = False
+        self._job_id = None
+        self._job_paused = False
+        self._job_worker = None
+        self._job_poll_inflight = False
+        self._job_poll_timer = QTimer(self)
+        self._job_poll_timer.setInterval(2000)
+        self._job_poll_timer.timeout.connect(self._poll_job_status)
+        self._job_snapshot_timer = QTimer(self)
+        self._job_snapshot_timer.setSingleShot(True)
+        self._job_snapshot_timer.setInterval(300)
+        self._job_snapshot_timer.timeout.connect(self._request_job_snapshot)
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -1158,45 +1169,21 @@ class LibraryTab(QWidget):
 
 
     def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool) -> None:
-        render_status = None
-        try:
-            render_status = self.ctx.indexer.renderer.status()
-        except Exception:
-            log.exception("取得 renderer 狀態失敗")
-            render_status = None
-        if render_status and not render_status.get("available", False):
-            status_map = render_status.get("status") or {}
-            status_lines = []
-            libreoffice_status = status_map.get("libreoffice")
-            windows_status = status_map.get("windows_com")
-            if libreoffice_status:
-                status_lines.append(f"LibreOffice：{libreoffice_status}")
-            if windows_status:
-                status_lines.append(f"PowerPoint（Windows COM）：{windows_status}")
-            status_detail = "\n".join(status_lines)
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Warning)
-            box.setWindowTitle("未偵測到可用的 renderer")
-            box.setText(
-                "目前沒有可用的投影片 renderer（LibreOffice/PowerPoint）。"
-                "此輪索引將只建立文字索引，不會產生縮圖。"
+        if not self.ctx:
+            return
+        library_root = self._select_library_root()
+        if not library_root:
+            return
+        if self._index_status_payload.get("scope_only") and files:
+            QMessageBox.information(
+                self,
+                "範圍提醒",
+                "後台 daemon 目前只支援整個目錄索引，將忽略選取的檔案範圍。",
             )
-            box.setInformativeText(
-                "Renderer 是系統層級的投影片軟體，無法透過 requirements.txt 安裝。"
-                "請先安裝 LibreOffice 或 PowerPoint 後再重試。要繼續索引嗎？"
-            )
-            if status_detail:
-                box.setDetailedText(status_detail)
-            box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-            box.setDefaultButton(QMessageBox.Ok)
-            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            if box.exec() != QMessageBox.Ok:
-                return
-
 
         self._cancel_index = False
-        self._pause_index = False
         self._indexing_active = True
+        self._job_paused = False
         self.btn_cancel.setEnabled(True)
         self.btn_pause.setEnabled(True)
         self.btn_pause.setText("暫停")
@@ -1207,30 +1194,24 @@ class LibraryTab(QWidget):
         self.prog.setValue(0)
         self.prog_label.setText("索引中...")
 
-        def task(_progress_emit):
-            def cancelled() -> bool:
-                return self._cancel_index
+        options = {
+            "enable_text": update_text,
+            "enable_thumb": update_image,
+            "enable_text_vec": update_text,
+            "enable_img_vec": update_image,
+            "enable_bm25": update_text,
+        }
 
-            def progress_hook(p):
-                _progress_emit(p)
-
-            def paused() -> bool:
-                return self._pause_index
-
-            return self.ctx.indexer.rebuild_for_files(
-                files,
-                on_progress=progress_hook,
-                cancel_flag=cancelled,
-                pause_flag=paused,
-                update_text=update_text,
-                update_image=update_image,
+        def task():
+            job_id = self.ctx.indexer.start_index_job(
+                library_root,
+                plan_mode="missing_or_changed",
+                options=options,
             )
+            return {"job_id": job_id}
 
-        w = Worker(task, None)
-        # 將 signals.progress.emit 注入到 task 參數
-        w.args = (w.signals.progress.emit,)
-        w.signals.progress.connect(self._on_index_progress)
-        w.signals.finished.connect(self._on_index_done)
+        w = Worker(task)
+        w.signals.finished.connect(self._on_job_started)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
 
@@ -1266,23 +1247,238 @@ class LibraryTab(QWidget):
         except Exception:
             log.exception("更新索引進度失敗")
 
+    def _select_library_root(self) -> str | None:
+        if not self.ctx:
+            return None
+        entries = [e for e in self.ctx.catalog.get_whitelist_entries() if e.get("enabled", True)]
+        if not entries:
+            QMessageBox.information(self, "尚未設定目錄", "請先在白名單新增至少一個目錄。")
+            return None
+        root = str(entries[0].get("path", "")).strip()
+        if len(entries) > 1:
+            msg = f"偵測到多個目錄，將先使用：{root}"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="info", timeout_ms=8000)
+            else:
+                self.prog_label.setText(msg)
+        return root or None
+
+    def _on_job_started(self, payload: object) -> None:
+        job_id = None
+        if isinstance(payload, dict):
+            job_id = payload.get("job_id")
+        if not job_id:
+            self._indexing_active = False
+            self.btn_cancel.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_index_needed.setEnabled(True)
+            self.btn_index_selected.setEnabled(True)
+            self.prog_label.setText("啟動後台任務失敗，請確認 daemon 狀態")
+            return
+        self._job_id = str(job_id)
+        self.prog_label.setText(f"已送出任務 {job_id}")
+        self._start_job_sse(job_id)
+        self._schedule_job_snapshot()
+
+    def _start_job_sse(self, job_id: str) -> None:
+        self._stop_job_sse()
+        if not self.ctx:
+            return
+        worker = self.ctx.indexer.sse_worker_for_job(job_id)
+        worker.event_received.connect(self._on_job_event)
+        worker.state_changed.connect(self._on_job_state)
+        worker.error.connect(self._on_job_error)
+        self._job_worker = worker
+        worker.start()
+
+    def _stop_job_sse(self) -> None:
+        if self._job_worker is None:
+            return
+        try:
+            self._job_worker.stop()
+            self._job_worker.wait(500)
+        except Exception:
+            log.exception("停止 SSE worker 失敗")
+        self._job_worker = None
+
+    def _on_job_event(self, payload: dict) -> None:
+        event_type = payload.get("type")
+        ev_payload = payload.get("payload") or {}
+        if event_type == "artifact_state_changed":
+            file_path = ev_payload.get("file") or ""
+            page_no = ev_payload.get("page_no")
+            kind = ev_payload.get("kind")
+            msg = f"完成 {kind}：{file_path}"
+            if page_no:
+                msg = f"完成 {kind}：{file_path} (第 {page_no} 頁)"
+            self.prog_label.setText(msg)
+        elif event_type == "job_completed":
+            self._finish_job("索引完成")
+            return
+        elif event_type == "job_cancelled":
+            self._finish_job("已取消")
+            return
+        elif event_type == "job_failed":
+            self._finish_job("索引失敗")
+            return
+        elif event_type in {"job_paused", "job_resumed"}:
+            self._job_paused = event_type == "job_paused"
+            self.btn_pause.setText("續跑" if self._job_paused else "暫停")
+        self._schedule_job_snapshot()
+
+    def _on_job_state(self, state: str) -> None:
+        if state in {"reconnecting", "disconnected"}:
+            if not self._job_poll_timer.isActive():
+                self._job_poll_timer.start()
+            self.prog_label.setText("事件串流中斷，正在重連...")
+        elif state == "connected":
+            if self._job_poll_timer.isActive():
+                self._job_poll_timer.stop()
+            self._schedule_job_snapshot()
+
+    def _on_job_error(self, message: str) -> None:
+        log.warning("SSE 錯誤：%s", message)
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast("事件串流中斷，正在嘗試重連。", level="warning")
+
+    def _schedule_job_snapshot(self) -> None:
+        if not self._job_snapshot_timer.isActive():
+            self._job_snapshot_timer.start()
+
+    def _request_job_snapshot(self) -> None:
+        if not self.ctx or not self._job_id or self._job_poll_inflight:
+            return
+        self._job_poll_inflight = True
+        job_id = self._job_id
+
+        def task():
+            return self.ctx.indexer.get_job(job_id)
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_job_snapshot)
+        w.signals.error.connect(self._on_job_snapshot_error)
+        self.main_window.thread_pool.start(w)
+
+    def _poll_job_status(self) -> None:
+        if not self._job_id:
+            return
+        self._request_job_snapshot()
+
+    def _on_job_snapshot(self, payload: object) -> None:
+        self._job_poll_inflight = False
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            return
+        self._apply_job_snapshot(payload)
+
+    def _on_job_snapshot_error(self, tb: str) -> None:
+        self._job_poll_inflight = False
+        log.warning("Job snapshot 失敗：%s", tb)
+
+    def _apply_job_snapshot(self, payload: dict) -> None:
+        stats = payload.get("stats", {}) if isinstance(payload.get("stats"), dict) else {}
+        options = payload.get("options", {}) if isinstance(payload.get("options"), dict) else {}
+        enabled_kinds = []
+        if options.get("enable_text"):
+            enabled_kinds.append("text")
+        if options.get("enable_thumb"):
+            enabled_kinds.append("thumb")
+        if options.get("enable_text_vec"):
+            enabled_kinds.append("text_vec")
+        if options.get("enable_img_vec"):
+            enabled_kinds.append("img_vec")
+        if options.get("enable_bm25"):
+            enabled_kinds.append("bm25")
+
+        total = 0
+        ready = 0
+        running = 0
+        queued = 0
+        error = 0
+        for kind in enabled_kinds:
+            kind_stats = stats.get(kind, {})
+            total += sum(int(v) for v in kind_stats.values())
+            ready += int(kind_stats.get("ready", 0))
+            running += int(kind_stats.get("running", 0))
+            queued += int(kind_stats.get("queued", 0))
+            error += int(kind_stats.get("error", 0))
+
+        if total > 0:
+            percent = int(ready / total * 100)
+            self.prog.setValue(percent)
+            self.prog.setRange(0, 100)
+            detail = f"{ready}/{total} 完成"
+            if running:
+                detail += f"，執行中 {running}"
+            if queued:
+                detail += f"，排隊中 {queued}"
+            if error:
+                detail += f"，錯誤 {error}"
+            self.prog_label.setText(detail)
+
+        now_running = payload.get("now_running") or {}
+        if isinstance(now_running, dict) and now_running.get("file_path"):
+            running_msg = f"正在處理：{now_running.get('file_path')}"
+            if now_running.get("page_no"):
+                running_msg += f" (第 {now_running.get('page_no')} 頁)"
+            if now_running.get("kind"):
+                running_msg += f" [{now_running.get('kind')}]"
+            self.main_window.status.showMessage(running_msg)
+
+        status = str(payload.get("status", ""))
+        if status in {"completed", "cancelled", "failed"}:
+            status_map = {
+                "completed": "索引完成",
+                "cancelled": "已取消",
+                "failed": "索引失敗",
+            }
+            self._finish_job(status_map.get(status, "索引完成"))
+
     def cancel_indexing(self) -> None:
         self._cancel_index = True
         self._cancel_scan = True
         self._cancel_prepare = True
+        if self._job_id and self.ctx:
+            ok = self.ctx.indexer.cancel_job(self._job_id)
+            if not ok and hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast("取消任務失敗，請確認 daemon 狀態。", level="error")
         self.prog_label.setText("取消中...")
 
     def toggle_pause_indexing(self) -> None:
-        self._pause_index = not self._pause_index
-        if self._pause_index:
-            self.btn_pause.setText("續跑")
-            self.prog_label.setText("已暫停")
+        if not self._job_id or not self.ctx:
+            return
+        if self._job_paused:
+            ok = self.ctx.indexer.resume_job(self._job_id)
+            if ok:
+                self._job_paused = False
+                self.btn_pause.setText("暫停")
+                self.prog_label.setText("索引中...")
+            elif hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast("恢復任務失敗，請確認 daemon 狀態。", level="error")
         else:
-            self.btn_pause.setText("暫停")
-            self.prog_label.setText("索引中...")
+            ok = self.ctx.indexer.pause_job(self._job_id)
+            if ok:
+                self._job_paused = True
+                self.btn_pause.setText("續跑")
+                self.prog_label.setText("已暫停")
+            elif hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast("暫停任務失敗，請確認 daemon 狀態。", level="error")
 
     def _on_index_done(self, result: object) -> None:
+        try:
+            code, msg = result
+        except Exception:
+            code, msg = 0, "索引完成"
+        self._finish_job(msg if code == 0 else "索引完成")
+
+    def _finish_job(self, message: str) -> None:
         self._indexing_active = False
+        self._job_id = None
+        self._job_paused = False
+        if self._job_poll_timer.isActive():
+            self._job_poll_timer.stop()
+        if self._job_snapshot_timer.isActive():
+            self._job_snapshot_timer.stop()
+        self._stop_job_sse()
         self.btn_cancel.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("暫停")
@@ -1295,17 +1491,8 @@ class LibraryTab(QWidget):
         self.refresh_dirs()
         if hasattr(self.main_window, "dashboard_tab"):
             self.main_window.dashboard_tab.refresh_metrics()
-
-        try:
-            code, msg = result
-            if code == 0:
-                self.prog.setValue(100)
-                self.prog_label.setText(msg)
-            else:
-                self.prog_label.setText(msg)
-        except Exception:
-            log.exception("更新索引完成訊息失敗")
-            self.prog_label.setText("索引完成")
+        self.prog.setValue(100)
+        self.prog_label.setText(message)
 
     def _on_error(self, tb: str) -> None:
         log.error("背景任務錯誤\n%s", tb)

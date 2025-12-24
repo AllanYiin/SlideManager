@@ -6,8 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-import requests
-
+from app.services.backend_client import BackendApiClient, BackendConfig, SseWorker
 from app.services.catalog_service import CatalogService
 from app.services.project_store import ProjectStore
 
@@ -25,10 +24,10 @@ class IndexProgress:
 class _DaemonStatus:
     def status(self) -> Dict[str, Any]:
         return {
-            "available": False,
-            "active": False,
-            "status": {"daemon": "未接線"},
-            "last_message": "後台已改為 daemon，UI 尚未接線。",
+            "available": True,
+            "active": True,
+            "status": {"daemon": "已接線"},
+            "last_message": "後台 daemon 已接線。",
         }
 
 
@@ -47,7 +46,7 @@ class IndexService:
         self.api_key = api_key
         self.renderer = _DaemonStatus()
         self.image_embedder = _DaemonImageEmbedder()
-        self._daemon_base = "http://127.0.0.1:5123"
+        self._client = BackendApiClient(BackendConfig())
 
     @staticmethod
     def _resolve_index_mode(update_text: bool, update_image: bool) -> str:
@@ -82,24 +81,42 @@ class IndexService:
             return 1, "已取消"
         try:
             payload = {
-                "library_root": str(self.store.root),
-                "options": {
-                    "enable_text": update_text,
-                    "enable_thumb": update_image,
-                    "enable_text_vec": update_text,
-                    "enable_img_vec": update_image,
-                    "enable_bm25": update_text,
-                },
+                "enable_text": update_text,
+                "enable_thumb": update_image,
+                "enable_text_vec": update_text,
+                "enable_img_vec": update_image,
+                "enable_bm25": update_text,
             }
-            resp = requests.post(
-                f"{self._daemon_base}/jobs/index",
-                json=payload,
-                timeout=10,
-            )
-            resp.raise_for_status()
+            job_id = self._client.start_index_job(str(self.store.root), "missing_or_changed", payload)
+            if not job_id:
+                raise RuntimeError("daemon 未回傳 job_id")
             if on_progress:
                 on_progress(IndexProgress(stage="daemon", current=0, total=1, message="已送出後台任務"))
             return 0, "已送出後台任務"
         except Exception as exc:
             logger.exception("啟動後台索引失敗: %s", exc)
             return 2, "啟動後台索引失敗，請確認後台 daemon 是否啟動"
+
+    def start_index_job(
+        self,
+        library_root: str,
+        *,
+        plan_mode: str,
+        options: Dict[str, Any],
+    ) -> Optional[str]:
+        return self._client.start_index_job(library_root, plan_mode, options)
+
+    def pause_job(self, job_id: str) -> bool:
+        return self._client.pause_job(job_id)
+
+    def resume_job(self, job_id: str) -> bool:
+        return self._client.resume_job(job_id)
+
+    def cancel_job(self, job_id: str) -> bool:
+        return self._client.cancel_job(job_id)
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        return self._client.get_job(job_id)
+
+    def sse_worker_for_job(self, job_id: str) -> SseWorker:
+        return self._client.sse_worker_for_job(job_id)
