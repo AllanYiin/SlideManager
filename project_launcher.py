@@ -596,6 +596,23 @@ def needs_src_pythonpath_fix(root: Path, entry_module: str) -> bool:
             return True
     return False
 
+
+def module_exists_in(base: Path, module: str) -> bool:
+    mod_path = base.joinpath(*module.split("."))
+    return mod_path.with_suffix(".py").is_file() or (mod_path / "__init__.py").is_file()
+
+
+def needs_src_pythonpath_for_uvicorn(root: Path, target: str) -> bool:
+    module = target.split(":", 1)[0]
+    if not module:
+        return False
+    src_base = root / "src"
+    if not src_base.is_dir():
+        return False
+    in_src = module_exists_in(src_base, module)
+    in_root = module_exists_in(root, module)
+    return in_src and not in_root
+
 # ============================================================
 # Frontend detection + Static site detection
 # ============================================================
@@ -787,10 +804,11 @@ def write_run_app_bat(root: Path, script_name: str, backend: dict,
 
     if mode == "uvicorn":
         target = backend.get("target", "")
+        py_path_fix = r'set "PYTHONPATH=%CD%\src;%CD%"' + "\n" if needs_src_pythonpath_for_uvicorn(root, target) else ""
         start_backend = rf"""echo([4/6] 啟動後端（uvicorn）...
 echo(啟動時間: %DATE% %TIME%
 if not exist "logs" mkdir "logs"
-start "Backend" cmd /k ""%PYEXE%" -m uvicorn {target} --host {backend_host} --port {backend_port} --log-level info 1>>"logs\backend.log" 2>>&1"
+{py_path_fix}start "Backend" cmd /k ""%PYEXE%" -m uvicorn {target} --host {backend_host} --port {backend_port} --log-level info 1>>"logs\backend.log" 2>>&1"
 """
         backend_url = f"http://{backend_host}:{backend_port}"
 
