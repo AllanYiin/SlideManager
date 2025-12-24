@@ -722,6 +722,12 @@ class IndexService:
         except Exception as exc:
             log.warning("建立向量檔案失敗：%s", exc)
 
+        if update_text:
+            try:
+                self._sync_legacy_index(manifest, slide_pages)
+            except Exception as exc:
+                log.warning("同步 index.json 失敗：%s", exc)
+
         if text_vectors_written:
             try:
                 self.store.compact_text_vectors()
@@ -735,3 +741,47 @@ class IndexService:
 
         progress("done", overall_total, overall_total, "索引完成")
         return 0, f"已索引 {total_files} 個檔案"
+
+    def _sync_legacy_index(self, manifest: Dict[str, Any], slide_pages: Dict[str, str]) -> None:
+        files_map: Dict[str, Dict[str, Any]] = {}
+        for entry in manifest.get("files", []):
+            if not isinstance(entry, dict):
+                continue
+            file_id = entry.get("file_id")
+            if not file_id:
+                continue
+            files_map[file_id] = {
+                "file_id": file_id,
+                "abs_path": entry.get("abs_path", ""),
+                "filename": entry.get("filename", ""),
+                "slide_count": entry.get("slide_count") or entry.get("slides_count") or 0,
+                "indexed": bool(entry.get("indexed")),
+                "indexed_at": entry.get("indexed_at"),
+                "index_mode": entry.get("index_mode"),
+            }
+
+        slides_map: Dict[str, Dict[str, Any]] = {}
+        for slide_id, text in slide_pages.items():
+            if not isinstance(slide_id, str) or "#" not in slide_id:
+                continue
+            file_id, page_raw = slide_id.split("#", 1)
+            try:
+                page = int(page_raw)
+            except Exception:
+                page = None
+            file_entry = files_map.get(file_id, {})
+            slides_map[slide_id] = {
+                "slide_id": slide_id,
+                "file_id": file_id,
+                "file_path": file_entry.get("abs_path", ""),
+                "filename": file_entry.get("filename", ""),
+                "page": page,
+                "text_for_bm25": "" if text is None else str(text),
+            }
+
+        self.store.save_index(
+            {
+                "files": files_map,
+                "slides": slides_map,
+            }
+        )
