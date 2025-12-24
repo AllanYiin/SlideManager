@@ -11,6 +11,8 @@ from app.backend_daemon.job_manager import JobManager
 from app.backend_daemon.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
+ROOT_DIR = Path(__file__).resolve().parents[3]
+SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def create_app(db_path: Path, schema_sql: str) -> FastAPI:
@@ -25,14 +27,24 @@ def create_app(db_path: Path, schema_sql: str) -> FastAPI:
     return app
 
 
+def build_app(root: Path = ROOT_DIR) -> FastAPI:
+    log_dir = root / ".slidemanager" / "logs"
+    setup_logging(log_dir)
+    db_path = root / ".slidemanager" / "index.sqlite"
+    try:
+        schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.exception("Failed to load schema.sql: %s", exc)
+        raise
+    return create_app(db_path, schema_sql)
+
+
+app = build_app()
+
+
 if __name__ == "__main__":
     try:
-        root = Path.cwd()
-        log_dir = root / ".slidemanager" / "logs"
-        setup_logging(log_dir)
-        db_path = root / ".slidemanager" / "index.sqlite"
-        schema_sql = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
-        app = create_app(db_path, schema_sql)
+        app = build_app(ROOT_DIR)
 
         import uvicorn
 
