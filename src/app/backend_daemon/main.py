@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI
+
+from app.backend_daemon.api import router
+from app.backend_daemon.event_bus import EventBus
+from app.backend_daemon.job_manager import JobManager
+from app.backend_daemon.logging_utils import setup_logging
+
+logger = logging.getLogger(__name__)
+
+
+def create_app(db_path: Path, schema_sql: str) -> FastAPI:
+    app = FastAPI()
+    bus = EventBus()
+    mgr = JobManager(db_path=db_path, schema_sql=schema_sql, event_bus=bus)
+
+    app.state.bus = bus
+    app.state.mgr = mgr
+    app.include_router(router)
+
+    return app
+
+
+if __name__ == "__main__":
+    try:
+        root = Path.cwd()
+        log_dir = root / ".slidemanager" / "logs"
+        setup_logging(log_dir)
+        db_path = root / ".slidemanager" / "index.sqlite"
+        schema_sql = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+        app = create_app(db_path, schema_sql)
+
+        import uvicorn
+
+        uvicorn.run(app, host="127.0.0.1", port=5123, log_level="info")
+    except Exception as exc:
+        setup_logging(Path.cwd() / ".slidemanager" / "logs")
+        logger.exception("Backend daemon crashed: %s", exc)
+        raise

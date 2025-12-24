@@ -3,9 +3,11 @@
 # Note: versions are intentionally not pinned. Pin after first successful install if needed.
 
 cryptography
+fastapi
 numpy<2
 onnxruntime
 openai
+pydantic
 pillow
 pyside6
 pymupdf
@@ -14,3 +16,4 @@ python-pptx
 rank-bm25
 requests
 tiktoken
+uvicorn
