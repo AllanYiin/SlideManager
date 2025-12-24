@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.backend_daemon.config import JobOptions
 from app.backend_daemon.event_bus import EventBus, sse_format
@@ -43,6 +43,12 @@ async def start_job(
     library_root: str = Body(...),
     options: JobOptions = Body(default_factory=JobOptions),
 ):
+    root_path = Path(library_root)
+    if not root_path.exists() or not root_path.is_dir():
+        return JSONResponse(
+            status_code=400,
+            content={"message": "library_root_not_found"},
+        )
     mgr = get_mgr(request)
     job_id = await mgr.create_job(library_root, options)
     return {"job_id": job_id}
