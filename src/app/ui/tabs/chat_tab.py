@@ -173,39 +173,11 @@ class ChatTab(QWidget):
         QMessageBox.critical(self, "搜尋失敗", msg)
 
     def _start_stream(self, messages: List[Dict[str, Any]]):
-        self._set_chat_busy(True, "串流回覆中...", streaming=True)
-        self._current_assistant_buf = ""
-        self._cancel_event = threading.Event()
-        self.transcript.append("\n助理：")
-
-        def task(_progress_emit):
-            # 在背景 thread 跑 asyncio loop
-            async def runner():
-                from app.services.openai_client import OpenAIClient
-
-                c = OpenAIClient(self.ctx.api_key)
-                async for delta in c.stream_responses(
-                    messages,
-                    model="gpt-4.1",
-                    temperature=0.4,
-                    max_output_tokens=1024,
-                    timeout=60.0,
-                    cancel_event=self._cancel_event,
-                ):
-                    _progress_emit(delta)
-
-            try:
-                asyncio.run(runner())
-                return 0
-            except Exception as e:
-                return e
-
-        w = Worker(task, None)
-        w.args = (w.signals.progress.emit,)
-        w.signals.progress.connect(self._on_stream_delta)
-        w.signals.finished.connect(self._on_stream_done)
-        w.signals.error.connect(self._on_error)
-        self.main_window.thread_pool.start(w)
+        self._set_chat_busy(False)
+        msg = "對話功能已移至後台 daemon，目前 UI 尚未接線。"
+        if hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast(msg, level="warning", timeout_ms=12000)
+        QMessageBox.information(self, "功能尚未接線", msg)
 
     def _on_stream_delta(self, delta: object) -> None:
         if self._cancel_event and self._cancel_event.is_set():

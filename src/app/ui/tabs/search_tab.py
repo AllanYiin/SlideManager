@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 from PySide6.QtWidgets import QAbstractItemView
-from app.core.errors import ErrorCode, format_user_message
 from app.core.logging import get_logger
 from app.services.search_service import SearchQuery
 from app.ui.async_worker import Worker
@@ -203,15 +202,11 @@ class SearchTab(QWidget):
 
         image_path = self._image_path
         if m == "image":
-            if not self.ctx.indexer.image_embedder.enabled_onnx():
-                msg = format_user_message(ErrorCode.ONNX_ERROR, detail="圖片模型不可用，無法進行以圖搜圖")
-                if hasattr(self.main_window, "show_toast"):
-                    self.main_window.show_toast(msg, level="error", timeout_ms=12000)
-                QMessageBox.information(self, "圖片模型不可用", msg)
-                return
-            if not image_path or not image_path.exists():
-                QMessageBox.information(self, "未選擇圖片", "請先選擇一張圖片")
-                return
+            msg = "圖片搜尋已移至後台 daemon，目前 UI 尚未接線。"
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(msg, level="warning", timeout_ms=12000)
+            QMessageBox.information(self, "功能尚未接線", msg)
+            return
 
         self._set_search_busy(True)
 
@@ -219,26 +214,6 @@ class SearchTab(QWidget):
             import traceback
 
             image_vec = None
-            if m == "image":
-                try:
-                    b = image_path.read_bytes() if image_path else b""
-                    image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
-                        b, dim=self.ctx.indexer.emb_cfg.image_dim
-                    )
-                except Exception as exc:
-                    return {
-                        "ok": False,
-                        "message": f"讀取圖片失敗：{exc}",
-                        "traceback": traceback.format_exc(),
-                    }
-            elif image_path and image_path.exists():
-                try:
-                    b = image_path.read_bytes()
-                    image_vec = self.ctx.indexer.image_embedder.embed_image_bytes(
-                        b, dim=self.ctx.indexer.emb_cfg.image_dim
-                    )
-                except Exception as exc:
-                    log.warning("讀取圖片向量失敗，已略過：%s", exc)
 
             try:
                 results = self.ctx.search.search(q, image_vec=image_vec)
