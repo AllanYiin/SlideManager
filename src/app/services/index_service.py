@@ -106,6 +106,9 @@ class IndexService:
     ) -> Optional[str]:
         return self._client.start_index_job(library_root, plan_mode, options)
 
+    def health(self) -> bool:
+        return self._client.health()
+
     def pause_job(self, job_id: str) -> bool:
         return self._client.pause_job(job_id)
 
