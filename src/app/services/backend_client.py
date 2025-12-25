@@ -127,6 +127,14 @@ class BackendApiClient:
                 json=payload,
                 timeout=(self.cfg.connect_timeout, self.cfg.read_timeout),
             )
+            if resp.status_code == 422:
+                log.warning("start_index_job received 422: %s", resp.text)
+                fallback_payload = {"library_root": library_root, **merged_options}
+                resp = requests.post(
+                    self._url("/jobs/index"),
+                    json=fallback_payload,
+                    timeout=(self.cfg.connect_timeout, self.cfg.read_timeout),
+                )
             resp.raise_for_status()
             return resp.json().get("job_id")
         except Exception as exc:
