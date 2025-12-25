@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import requests
 from PySide6.QtCore import QThread, Signal
 
+from app.core.backend_config import get_backend_base_url
 from app.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -18,7 +19,7 @@ log = get_logger(__name__)
 
 @dataclass
 class BackendConfig:
-    base_url: str = "http://127.0.0.1:5123"
+    base_url: str = field(default_factory=get_backend_base_url)
     connect_timeout: float = 3.0
     read_timeout: float = 30.0
 
