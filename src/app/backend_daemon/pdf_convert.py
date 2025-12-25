@@ -43,7 +43,7 @@ def convert_pptx_to_pdf_libreoffice(
 
         creationflags = 0
         if is_windows():
-            creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
         proc = subprocess.Popen(
             cmd,
