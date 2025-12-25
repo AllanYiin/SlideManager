@@ -1203,11 +1203,15 @@ class LibraryTab(QWidget):
         }
 
         def task():
+            if not self.ctx.indexer.health():
+                return {"job_id": None, "error": "無法連線後台 daemon（127.0.0.1:5123）。請先確認 daemon 是否已啟動。"}
             job_id = self.ctx.indexer.start_index_job(
                 library_root,
                 plan_mode="missing_or_changed",
                 options=options,
             )
+            if not job_id:
+                return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
             return {"job_id": job_id}
 
         w = Worker(task)
@@ -1265,15 +1269,20 @@ class LibraryTab(QWidget):
 
     def _on_job_started(self, payload: object) -> None:
         job_id = None
+        error_message = None
         if isinstance(payload, dict):
             job_id = payload.get("job_id")
+            error_message = payload.get("error")
         if not job_id:
             self._indexing_active = False
             self.btn_cancel.setEnabled(False)
             self.btn_pause.setEnabled(False)
             self.btn_index_needed.setEnabled(True)
             self.btn_index_selected.setEnabled(True)
-            self.prog_label.setText("啟動後台任務失敗，請確認 daemon 狀態")
+            message = error_message or "啟動後台任務失敗，請確認 daemon 狀態"
+            self.prog_label.setText(message)
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(message, level="error", timeout_ms=12000)
             return
         self._job_id = str(job_id)
         self.prog_label.setText(f"已送出任務 {job_id}")
