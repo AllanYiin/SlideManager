@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.backend_daemon.config import JobOptions
@@ -15,11 +15,11 @@ from app.backend_daemon.job_manager import JobManager
 router = APIRouter()
 
 
-def get_bus(request) -> EventBus:
+def get_bus(request: Request) -> EventBus:
     return request.app.state.bus
 
 
-def get_mgr(request) -> JobManager:
+def get_mgr(request: Request) -> JobManager:
     return request.app.state.mgr
 
 
@@ -39,7 +39,7 @@ async def health():
 
 @router.post("/jobs/index")
 async def start_job(
-    request,
+    request: Request,
     library_root: str = Body(...),
     options: JobOptions = Body(default_factory=JobOptions),
 ):
@@ -55,7 +55,7 @@ async def start_job(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(request, job_id: str):
+async def get_job(request: Request, job_id: str):
     mgr = get_mgr(request)
     row = mgr.conn.execute(
         "SELECT job_id, library_root, created_at, started_at, finished_at, status, options_json "
@@ -122,28 +122,28 @@ async def get_job(request, job_id: str):
 
 
 @router.post("/jobs/{job_id}/pause")
-async def pause_job(request, job_id: str):
+async def pause_job(request: Request, job_id: str):
     mgr = get_mgr(request)
     await mgr.pause_job(job_id)
     return {"ok": True}
 
 
 @router.post("/jobs/{job_id}/resume")
-async def resume_job(request, job_id: str):
+async def resume_job(request: Request, job_id: str):
     mgr = get_mgr(request)
     await mgr.resume_job(job_id)
     return {"ok": True}
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_job(request, job_id: str):
+async def cancel_job(request: Request, job_id: str):
     mgr = get_mgr(request)
     await mgr.cancel_job(job_id)
     return {"ok": True}
 
 
 @router.get("/jobs/{job_id}/events")
-async def job_events(request, job_id: str):
+async def job_events(request: Request, job_id: str):
     bus = get_bus(request)
     q = await bus.subscribe(job_id)
 
@@ -158,7 +158,7 @@ async def job_events(request, job_id: str):
 
 @router.get("/library/summary")
 async def library_summary(
-    request,
+    request: Request,
     library_root: str | None = Query(default=None),
 ):
     mgr = get_mgr(request)
@@ -194,7 +194,7 @@ async def library_summary(
 
 @router.get("/library/files")
 async def library_files(
-    request,
+    request: Request,
     library_root: str | None = Query(default=None),
 ):
     mgr = get_mgr(request)
