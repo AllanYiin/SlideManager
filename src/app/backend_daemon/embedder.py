@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import struct
 from typing import List
+
+if importlib.util.find_spec("openai") is None:
+    class OpenAI:  # type: ignore[override]
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise ModuleNotFoundError("openai is required for embeddings")
+else:
+    OpenAI = importlib.import_module("openai").OpenAI
 
 from app.backend_daemon.rate_limit import DualTokenBucket, backoff_delay
 
@@ -25,8 +34,6 @@ async def embed_text_batch_openai(
     limiter: DualTokenBucket,
     max_retries: int,
 ) -> List[List[float]]:
-    from openai import OpenAI
-
     client = OpenAI()
 
     tok_cost = sum(estimate_tokens(t) for t in texts)

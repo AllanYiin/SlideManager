@@ -57,4 +57,4 @@ class DualTokenBucket:
 
 def backoff_delay(attempt: int, base: float = 0.5, cap: float = 20.0) -> float:
     exp = min(cap, base * (2**attempt))
-    return exp * (0.5 + random.random())
+    return exp * (0.5 + random.random() * 0.5)

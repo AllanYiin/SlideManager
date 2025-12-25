@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import zipfile
 from pathlib import Path
@@ -56,9 +57,13 @@ def build_pptx(
 
 
 def build_pdf(path: Path, pages: int = 1, width: float = 320, height: float = 240) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if importlib.util.find_spec("fitz") is None:
+        path.write_bytes(b"%PDF-1.4\n% Fake PDF for tests.\n")
+        return
+
     import fitz
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     for _ in range(pages):
         doc.new_page(width=width, height=height)
