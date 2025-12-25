@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -116,10 +117,10 @@ class BackendApiClient:
         options: Dict[str, Any],
     ) -> Optional[str]:
         try:
+            merged_options = self._merge_index_options(options)
             payload = {
                 "library_root": library_root,
-                "plan_mode": plan_mode,
-                "options": options,
+                "options": merged_options,
             }
             resp = requests.post(
                 self._url("/jobs/index"),
@@ -131,6 +132,58 @@ class BackendApiClient:
         except Exception as exc:
             log.exception("start_index_job failed: %s", exc)
             return None
+
+    @staticmethod
+    def _merge_index_options(overrides: Dict[str, Any]) -> Dict[str, Any]:
+        default_options = {
+            "enable_text": True,
+            "enable_thumb": True,
+            "enable_text_vec": True,
+            "enable_img_vec": True,
+            "enable_bm25": True,
+            "thumb": {
+                "enabled": True,
+                "width": 320,
+                "height_4_3": 240,
+                "height_16_9": 180,
+                "render_dpi": 144,
+            },
+            "pdf": {
+                "enabled": True,
+                "timeout_sec": 180,
+                "max_concurrency": 1,
+                "prefer": "auto",
+            },
+            "embed": {
+                "enabled_text": True,
+                "enabled_image": True,
+                "model_text": "text-embedding-3-large",
+                "model_image": "image-embedding-1",
+                "max_concurrency": 2,
+                "batch_size": 64,
+                "req_per_min": 120,
+                "tok_per_min": 200000,
+                "max_retries": 8,
+            },
+            "commit_every_pages": 50,
+            "commit_every_sec": 1,
+            "enable_sentence_df": True,
+            "sentence_df_threshold": 0.3,
+            "sentence_min_len": 6,
+        }
+
+        def merge(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+            for key, value in extra.items():
+                if isinstance(value, dict) and isinstance(base.get(key), dict):
+                    base[key] = merge(base[key], value)
+                else:
+                    base[key] = value
+            return base
+
+        merged = copy.deepcopy(default_options)
+        if overrides:
+            merge(merged, overrides)
+        return merged
 
     def pause_job(self, job_id: str) -> bool:
         try:
