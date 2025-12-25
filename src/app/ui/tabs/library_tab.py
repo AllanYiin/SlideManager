@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.backend_config import get_backend_host, get_backend_port
 from app.core.logging import get_logger
 from app.ui.async_worker import Worker
 from app.ui.metrics import STATUS_LABELS, classify_doc_status
@@ -1204,7 +1205,12 @@ class LibraryTab(QWidget):
 
         def task():
             if not self.ctx.indexer.health():
-                return {"job_id": None, "error": "無法連線後台 daemon（127.0.0.1:5123）。請先確認 daemon 是否已啟動。"}
+                backend_host = get_backend_host()
+                backend_port = get_backend_port()
+                return {
+                    "job_id": None,
+                    "error": f"無法連線後台 daemon（{backend_host}:{backend_port}）。請先確認 daemon 是否已啟動。",
+                }
             job_id = self.ctx.indexer.start_index_job(
                 library_root,
                 plan_mode="missing_or_changed",
