@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from app.services.backend_client import BackendApiClient, BackendConfig, SseWorker
+from app.services.backend_daemon_manager import BackendDaemonManager
 from app.services.catalog_service import CatalogService
 from app.services.project_store import ProjectStore
 
@@ -46,7 +47,9 @@ class IndexService:
         self.api_key = api_key
         self.renderer = _DaemonStatus()
         self.image_embedder = _DaemonImageEmbedder()
-        self._client = BackendApiClient(BackendConfig())
+        cfg = BackendConfig()
+        self._client = BackendApiClient(cfg)
+        self._daemon = BackendDaemonManager(cfg, root_dir=store.root)
 
     @staticmethod
     def _resolve_index_mode(update_text: bool, update_image: bool) -> str:
@@ -108,6 +111,9 @@ class IndexService:
 
     def health(self) -> bool:
         return self._client.health()
+
+    def ensure_backend_ready(self, *, timeout_sec: float = 6.0) -> bool:
+        return self._daemon.ensure_running(timeout_sec=timeout_sec)
 
     def pause_job(self, job_id: str) -> bool:
         return self._client.pause_job(job_id)
