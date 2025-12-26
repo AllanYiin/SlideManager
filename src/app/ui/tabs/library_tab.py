@@ -104,6 +104,8 @@ class LibraryTab(QWidget):
         self._job_snapshot_timer.setSingleShot(True)
         self._job_snapshot_timer.setInterval(300)
         self._job_snapshot_timer.timeout.connect(self._request_job_snapshot)
+        self._pending_index_roots: List[str] = []
+        self._pending_index_options: Dict[str, Any] = {}
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -1172,8 +1174,8 @@ class LibraryTab(QWidget):
     def _start_index(self, files: List[Dict[str, Any]], update_text: bool, update_image: bool) -> None:
         if not self.ctx:
             return
-        library_root = self._select_library_root()
-        if not library_root:
+        library_roots = self._select_library_roots()
+        if not library_roots:
             return
         if self._index_status_payload.get("scope_only") and files:
             QMessageBox.information(
@@ -1182,19 +1184,6 @@ class LibraryTab(QWidget):
                 "後台 daemon 目前只支援整個目錄索引，將忽略選取的檔案範圍。",
             )
 
-        self._cancel_index = False
-        self._indexing_active = True
-        self._job_paused = False
-        self.btn_cancel.setEnabled(True)
-        self.btn_pause.setEnabled(True)
-        self.btn_pause.setText("暫停")
-        self.btn_index_needed.setEnabled(False)
-        self.btn_index_selected.setEnabled(False)
-
-        self.prog.setRange(0, 100)
-        self.prog.setValue(0)
-        self.prog_label.setText("索引中...")
-
         options = {
             "enable_text": update_text,
             "enable_thumb": update_image,
@@ -1202,31 +1191,15 @@ class LibraryTab(QWidget):
             "enable_img_vec": update_image,
             "enable_bm25": update_text,
         }
-
-        def task():
-            if not self.ctx.indexer.ensure_backend_ready():
-                backend_host = get_backend_host()
-                backend_port = get_backend_port()
-                return {
-                    "job_id": None,
-                    "error": (
-                        f"無法連線後台 daemon（{backend_host}:{backend_port}）。"
-                        "請確認 daemon 是否已啟動。"
-                    ),
-                }
-            job_id = self.ctx.indexer.start_index_job(
-                library_root,
-                plan_mode="missing_or_changed",
-                options=options,
+        if len(library_roots) > 1 and hasattr(self.main_window, "show_toast"):
+            self.main_window.show_toast(
+                f"偵測到多個目錄，將依序索引 {len(library_roots)} 個。",
+                level="info",
+                timeout_ms=8000,
             )
-            if not job_id:
-                return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
-            return {"job_id": job_id}
-
-        w = Worker(task)
-        w.signals.finished.connect(self._on_job_started)
-        w.signals.error.connect(self._on_error)
-        self.main_window.thread_pool.start(w)
+        self._pending_index_roots = list(library_roots[1:])
+        self._pending_index_options = dict(options)
+        self._start_index_job_for_root(library_roots[0], options)
 
     def _on_index_progress(self, p: object) -> None:
         try:
@@ -1260,40 +1233,80 @@ class LibraryTab(QWidget):
         except Exception:
             log.exception("更新索引進度失敗")
 
-    def _select_library_root(self) -> str | None:
+    def _select_library_roots(self) -> List[str]:
         if not self.ctx:
-            return None
+            return []
         entries = [e for e in self.ctx.catalog.get_whitelist_entries() if e.get("enabled", True)]
         if not entries:
             QMessageBox.information(self, "尚未設定目錄", "請先在白名單新增至少一個目錄。")
-            return None
-        root = str(entries[0].get("path", "")).strip()
-        if len(entries) > 1:
-            msg = f"偵測到多個目錄，將先使用：{root}"
-            if hasattr(self.main_window, "show_toast"):
-                self.main_window.show_toast(msg, level="info", timeout_ms=8000)
-            else:
-                self.prog_label.setText(msg)
-        return root or None
+            return []
+        roots = [str(e.get("path", "")).strip() for e in entries if str(e.get("path", "")).strip()]
+        return [r for r in roots if r]
+
+    def _start_index_job_for_root(self, library_root: str, options: Dict[str, Any]) -> None:
+        if not self.ctx:
+            return
+        self._cancel_index = False
+        self._indexing_active = True
+        self._job_paused = False
+        self.btn_cancel.setEnabled(True)
+        self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("暫停")
+        self.btn_index_needed.setEnabled(False)
+        self.btn_index_selected.setEnabled(False)
+
+        self.prog.setRange(0, 100)
+        self.prog.setValue(0)
+        self.prog_label.setText("索引中...")
+
+        def task():
+            if not self.ctx.indexer.ensure_backend_ready():
+                backend_host = get_backend_host()
+                backend_port = get_backend_port()
+                return {
+                    "job_id": None,
+                    "error": (
+                        f"無法連線後台 daemon（{backend_host}:{backend_port}）。"
+                        "請確認 daemon 是否已啟動。"
+                    ),
+                }
+            job_id = self.ctx.indexer.start_index_job(
+                library_root,
+                plan_mode="missing_or_changed",
+                options=options,
+            )
+            if not job_id:
+                return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
+            return {"job_id": job_id, "root": library_root}
+
+        w = Worker(task)
+        w.signals.finished.connect(self._on_job_started)
+        w.signals.error.connect(self._on_error)
+        self.main_window.thread_pool.start(w)
 
     def _on_job_started(self, payload: object) -> None:
         job_id = None
         error_message = None
+        root = None
         if isinstance(payload, dict):
             job_id = payload.get("job_id")
             error_message = payload.get("error")
+            root = payload.get("root")
         if not job_id:
             self._indexing_active = False
             self.btn_cancel.setEnabled(False)
             self.btn_pause.setEnabled(False)
             self.btn_index_needed.setEnabled(True)
             self.btn_index_selected.setEnabled(True)
+            self._pending_index_roots = []
             message = error_message or "啟動後台任務失敗，請確認 daemon 狀態"
             self.prog_label.setText(message)
             if hasattr(self.main_window, "show_toast"):
                 self.main_window.show_toast(message, level="error", timeout_ms=12000)
             return
         self._job_id = str(job_id)
+        if root and hasattr(self.main_window, "status"):
+            self.main_window.status.showMessage(f"正在索引目錄：{root}")
         self.prog_label.setText(f"已送出任務 {job_id}")
         self._start_job_sse(job_id)
         self._schedule_job_snapshot()
@@ -1331,13 +1344,13 @@ class LibraryTab(QWidget):
                 msg = f"完成 {kind}：{file_path} (第 {page_no} 頁)"
             self.prog_label.setText(msg)
         elif event_type == "job_completed":
-            self._finish_job("索引完成")
+            self._finish_job("索引完成", status="completed")
             return
         elif event_type == "job_cancelled":
-            self._finish_job("已取消")
+            self._finish_job("已取消", status="cancelled")
             return
         elif event_type == "job_failed":
-            self._finish_job("索引失敗")
+            self._finish_job("索引失敗", status="failed")
             return
         elif event_type in {"job_paused", "job_resumed"}:
             self._job_paused = event_type == "job_paused"
@@ -1449,12 +1462,13 @@ class LibraryTab(QWidget):
                 "cancelled": "已取消",
                 "failed": "索引失敗",
             }
-            self._finish_job(status_map.get(status, "索引完成"))
+            self._finish_job(status_map.get(status, "索引完成"), status=status)
 
     def cancel_indexing(self) -> None:
         self._cancel_index = True
         self._cancel_scan = True
         self._cancel_prepare = True
+        self._pending_index_roots = []
         if self._job_id and self.ctx:
             ok = self.ctx.indexer.cancel_job(self._job_id)
             if not ok and hasattr(self.main_window, "show_toast"):
@@ -1488,7 +1502,7 @@ class LibraryTab(QWidget):
             code, msg = 0, "索引完成"
         self._finish_job(msg if code == 0 else "索引完成")
 
-    def _finish_job(self, message: str) -> None:
+    def _finish_job(self, message: str, *, status: str | None = None) -> None:
         self._indexing_active = False
         self._job_id = None
         self._job_paused = False
@@ -1511,6 +1525,18 @@ class LibraryTab(QWidget):
             self.main_window.dashboard_tab.refresh_metrics()
         self.prog.setValue(100)
         self.prog_label.setText(message)
+        if status == "completed" and self._pending_index_roots:
+            next_root = self._pending_index_roots.pop(0)
+            options = dict(self._pending_index_options)
+            if hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(
+                    f"開始索引下一個目錄：{next_root}",
+                    level="info",
+                    timeout_ms=8000,
+                )
+            self._start_index_job_for_root(next_root, options)
+        elif status in {"failed", "cancelled"}:
+            self._pending_index_roots = []
 
     def _on_error(self, tb: str) -> None:
         log.error("背景任務錯誤\n%s", tb)

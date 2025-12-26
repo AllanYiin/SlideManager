@@ -14,8 +14,8 @@ class FileScan:
 
 def scan_files_under(root: Path) -> List[FileScan]:
     out: List[FileScan] = []
-    for p in root.rglob("*.pptx"):
-        if not p.is_file():
+    for p in root.iterdir():
+        if not (p.is_file() and p.suffix.lower() in (".pptx",)):
             continue
         st = p.stat()
         out.append(
