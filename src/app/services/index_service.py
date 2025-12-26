@@ -65,7 +65,13 @@ class IndexService:
         try:
             manifest = self.store.load_manifest()
             files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
-            return [f for f in files if not f.get("missing")]
+            filtered = [f for f in files if not f.get("missing")]
+            logger.info(
+                "[INDEX_FLOW][NEEDED] filter=missing before=%d after=%d conditions=missing is False",
+                len(files),
+                len(filtered),
+            )
+            return filtered
         except Exception as exc:
             logger.exception("讀取需要索引的檔案失敗: %s", exc)
             return []

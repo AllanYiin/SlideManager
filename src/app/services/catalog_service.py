@@ -49,7 +49,20 @@ def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
     if not recursive:
         return list(root.glob("*.pptx"))
     files: List[Path] = []
-    for current_root, dirnames, filenames in os.walk(root):
+    walk_items = list(os.walk(root))
+    total_dirs = len(walk_items)
+    log.info(
+        "[SCAN_FILES] enumerate=os.walk total=%d root=%s",
+        total_dirs,
+        root,
+    )
+    for dir_index, (current_root, dirnames, filenames) in enumerate(walk_items, start=1):
+        log.info(
+            "[SCAN_FILES] enumerate=os.walk total=%d current=%d dir=%s",
+            total_dirs,
+            dir_index,
+            current_root,
+        )
         filtered_dirs = [d for d in dirnames if d.casefold() not in _SKIP_DIR_NAMES]
         if len(filtered_dirs) != len(dirnames):
             skipped = sorted(set(dirnames) - set(filtered_dirs))
@@ -60,7 +73,14 @@ def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
                 skipped_paths or ", ".join(skipped),
             )
         dirnames[:] = filtered_dirs
-        for name in filenames:
+        total_files = len(filenames)
+        for file_index, name in enumerate(filenames, start=1):
+            log.info(
+                "[SCAN_FILES] enumerate=filenames total=%d current=%d dir=%s",
+                total_files,
+                file_index,
+                current_root,
+            )
             if name.lower().endswith(".pptx"):
                 files.append(Path(current_root) / name)
     return files
@@ -159,6 +179,7 @@ class CatalogService:
     ) -> Dict[str, Any]:
         """掃描白名單目錄，更新 manifest.json。"""
         whitelist = self._load_whitelist()
+        log.info("[SCAN] start whitelist_count=%d", len(whitelist))
         existing = self.store.load_manifest().get("files", [])
         by_path = {e.get("abs_path"): e for e in existing if isinstance(e, dict) and e.get("abs_path")}
         touched_paths = set()
@@ -167,13 +188,27 @@ class CatalogService:
         files: List[Dict[str, Any]] = []
         batch: List[Dict[str, Any]] = []
         scanned_count = 0
-        for entry in whitelist:
+        total_whitelist = len(whitelist)
+        for idx, entry in enumerate(whitelist, start=1):
             if cancel_flag and cancel_flag():
                 log.info("掃描已取消")
                 return {"cancelled": True}
             if not entry.get("enabled", True):
+                log.info(
+                    "[SCAN] skip_disabled total=%d current=%d path=%s",
+                    total_whitelist,
+                    idx,
+                    entry.get("path"),
+                )
                 continue
             root = Path(str(entry.get("path")))
+            log.info(
+                "[SCAN] enumerate=whitelist total=%d current=%d path=%s recursive=%s",
+                total_whitelist,
+                idx,
+                root,
+                entry.get("recursive", True),
+            )
             if not root.exists():
                 scan_errors.append(
                     {
@@ -195,11 +230,25 @@ class CatalogService:
                 log.warning("[PERMISSION_DENIED] 白名單路徑權限不足：%s", root)
                 continue
             try:
-                for path in _iter_pptx_files(root, entry.get("recursive", True)):
+                file_candidates = _iter_pptx_files(root, entry.get("recursive", True))
+                total_candidates = len(file_candidates)
+                log.info(
+                    "[SCAN] enumerate=_iter_pptx_files total=%d root=%s",
+                    total_candidates,
+                    root,
+                )
+                for file_index, path in enumerate(file_candidates, start=1):
                     if cancel_flag and cancel_flag():
                         log.info("掃描已取消")
                         return {"cancelled": True}
+                    log.info(
+                        "[SCAN] enumerate=_iter_pptx_files total=%d current=%d path=%s",
+                        total_candidates,
+                        file_index,
+                        path,
+                    )
                     if path.name.startswith("~$"):
+                        log.info("[SCAN] skip_temp_file path=%s", path)
                         continue
                     try:
                         st = path.stat()
@@ -222,8 +271,8 @@ class CatalogService:
                                 meta = _read_pptx_metadata(path)
                                 core_props = meta.get("core_properties")
                                 slide_count = meta.get("slide_count")
-                            except Exception as e:
-                                log.warning("讀取 metadata 失敗：%s (%s)", path, e)
+                            except Exception:
+                                log.exception("讀取 metadata 失敗：%s", path)
 
                         entry = {
                             "file_id": file_id,
@@ -265,8 +314,8 @@ class CatalogService:
                             }
                         )
                         log.warning("[PERMISSION_DENIED] 掃描檔案失敗：%s (%s)", path, e)
-                    except Exception as e:
-                        log.warning("掃描檔案失敗：%s (%s)", path, e)
+                    except Exception:
+                        log.exception("掃描檔案失敗：%s", path)
             except PermissionError as e:
                 scan_errors.append(
                     {
@@ -286,7 +335,13 @@ class CatalogService:
             )
 
         # 標記 missing
-        for prev in existing:
+        total_existing = len(existing)
+        log.info(
+            "[SCAN] mark_missing enumerate=manifest.files total=%d touched=%d",
+            total_existing,
+            len(touched_paths),
+        )
+        for idx, prev in enumerate(existing, start=1):
             if not isinstance(prev, dict):
                 continue
             abs_path = prev.get("abs_path")
@@ -294,6 +349,12 @@ class CatalogService:
                 prev_entry = dict(prev)
                 prev_entry["missing"] = True
                 files.append(prev_entry)
+            if idx % 50 == 0 or idx == total_existing:
+                log.info(
+                    "[SCAN] mark_missing enumerate=manifest.files total=%d current=%d",
+                    total_existing,
+                    idx,
+                )
 
         def _sort_key(item: Dict[str, Any]) -> tuple:
             mtime = item.get("modified_time")
