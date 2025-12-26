@@ -15,13 +15,14 @@ class FileScan:
 def scan_files_under(root: Path) -> List[FileScan]:
     out: List[FileScan] = []
     for p in root.iterdir():
-        if p.is_file() and p.suffix.lower() in (".pptx",):
-            st = p.stat()
-            out.append(
-                FileScan(
-                    path=str(p.resolve()),
-                    size_bytes=st.st_size,
-                    mtime_epoch=int(st.st_mtime),
-                )
+        if not (p.is_file() and p.suffix.lower() in (".pptx",)):
+            continue
+        st = p.stat()
+        out.append(
+            FileScan(
+                path=str(p.resolve()),
+                size_bytes=st.st_size,
+                mtime_epoch=int(st.st_mtime),
             )
+        )
     return out
