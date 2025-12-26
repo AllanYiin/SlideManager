@@ -1204,12 +1204,15 @@ class LibraryTab(QWidget):
         }
 
         def task():
-            if not self.ctx.indexer.health():
+            if not self.ctx.indexer.ensure_backend_ready():
                 backend_host = get_backend_host()
                 backend_port = get_backend_port()
                 return {
                     "job_id": None,
-                    "error": f"無法連線後台 daemon（{backend_host}:{backend_port}）。請先確認 daemon 是否已啟動。",
+                    "error": (
+                        f"無法連線後台 daemon（{backend_host}:{backend_port}）。"
+                        "請確認 daemon 是否已啟動。"
+                    ),
                 }
             job_id = self.ctx.indexer.start_index_job(
                 library_root,
