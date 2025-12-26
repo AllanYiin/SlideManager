@@ -53,7 +53,12 @@ def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
         filtered_dirs = [d for d in dirnames if d.casefold() not in _SKIP_DIR_NAMES]
         if len(filtered_dirs) != len(dirnames):
             skipped = sorted(set(dirnames) - set(filtered_dirs))
-            log.info("略過預設不掃描子目錄：%s -> %s", current_root, ", ".join(skipped))
+            skipped_paths = ", ".join(str(Path(current_root) / name) for name in skipped)
+            log.info(
+                "略過預設不掃描子目錄：%s -> %s",
+                current_root,
+                skipped_paths or ", ".join(skipped),
+            )
         dirnames[:] = filtered_dirs
         for name in filenames:
             if name.lower().endswith(".pptx"):
