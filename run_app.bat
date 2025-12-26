@@ -2,38 +2,39 @@
 setlocal ENABLEDELAYEDEXPANSION
 
 REM =========================================
-REM ¤@Áä¦w¸Ë / ±Ò°Ê¡]Ã­©wª©¡^
-REM ÀÉ¦W©T©w¡Grun_app.bat¡]ANSI ½s½X¡^
-REM ¥Ñ project_launcher.py ¦Û°Ê²£¥Í
+REM ä¸€éµå®‰è£ / å•Ÿå‹•ï¼ˆç©©å®šç‰ˆï¼‰
+REM æª”åå›ºå®šï¼šrun_app.batï¼ˆANSI ç·¨ç¢¼ï¼‰
+REM ç”± project_launcher.py è‡ªå‹•ç”¢ç”Ÿ
 REM =========================================
 
 pushd "%~dp0"
 
 echo( =========================================
-echo(   ¤@Áä¦w¸Ë / ±Ò°Ê¡]Ã­©wª©¡^
+echo(   ä¸€éµå®‰è£ / å•Ÿå‹•ï¼ˆç©©å®šç‰ˆï¼‰
 echo( =========================================
 echo(.
 
-echo( [1/6] ÀË¬d Python...
+echo( [1/6] æª¢æŸ¥ Python...
 where python >nul 2>&1
 if errorlevel 1 (
   echo(.
-  echo( §ä¤£¨ì Python¡A½Ğ¥ı¦w¸Ë Python 3.10 ¥H¤W¡C
-  echo( ¤U¸üºô§}¡Ghttps://www.python.org/downloads/
-  echo( ¦w¸Ë®É½Ğ¤Ä¿ï Add Python to PATH
+  echo( æ‰¾ä¸åˆ° Pythonï¼Œè«‹å…ˆå®‰è£ Python 3.10 ä»¥ä¸Šã€‚
+  echo( ä¸‹è¼‰ç¶²å€ï¼šhttps://www.python.org/downloads/
+  echo( å®‰è£æ™‚è«‹å‹¾é¸ Add Python to PATH
   echo(.
   pause
   popd
   exit /b 1
 )
 
-echo( [2/6] «Ø¥ßµêÀÀÀô¹Ò¡].venv¡^...
+echo( [2/6] å»ºç«‹è™›æ“¬ç’°å¢ƒï¼ˆ.venvï¼‰...
 if not exist ".venv\Scripts\python.exe" (
   python -m venv ".venv"
   if errorlevel 1 (
     echo(.
-    echo( µLªk«Ø¥ßµêÀÀÀô¹Ò¡C¥i¯à­ì¦]¡GÅv­­¤£¨¬©Î¨¾¬rªı¾×¡C
-    echo( «ØÄ³¡G¥kÁä run_app.bat ¡÷ ¥H¨t²ÎºŞ²z­û¨­¤À°õ¦æ
+start "Backend Worker" cmd /k ""%PYEXE%" -m app.backend_daemon.worker 1>>"logs\backend_worker.log" 2>>&1"
+    echo( ç„¡æ³•å»ºç«‹è™›æ“¬ç’°å¢ƒã€‚å¯èƒ½åŸå› ï¼šæ¬Šé™ä¸è¶³æˆ–é˜²æ¯’é˜»æ“‹ã€‚
+    echo( å»ºè­°ï¼šå³éµ run_app.bat â†’ ä»¥ç³»çµ±ç®¡ç†å“¡èº«åˆ†åŸ·è¡Œ
     echo(.
     pause
     popd
@@ -43,33 +44,33 @@ if not exist ".venv\Scripts\python.exe" (
 
 set "PYEXE=%~dp0.venv\Scripts\python.exe"
 
-echo( [3/6] ¦Û°ÊÀË¬d/­×¥¿ + ¦w¸Ë¨Ì¿à...
+echo( [3/6] è‡ªå‹•æª¢æŸ¥/ä¿®æ­£ + å®‰è£ä¾è³´...
 "%PYEXE%" "project_launcher.py"
 if errorlevel 1 (
   echo(.
-  echo( [ERROR] ¦Û°ÊÀË¬d/­×¥¿¥¢±Ñ¡A½Ğ¬İ¤W¤è¿é¥X°T®§¡C
+  echo( [ERROR] è‡ªå‹•æª¢æŸ¥/ä¿®æ­£å¤±æ•—ï¼Œè«‹çœ‹ä¸Šæ–¹è¼¸å‡ºè¨Šæ¯ã€‚
   echo(.
   pause
   popd
   exit /b 1
 )
 
-echo( [4/6] ±Ò°Ê«áºİ¡]uvicorn¡^...
-echo( ±Ò°Ê®É¶¡: %DATE% %TIME%
+echo( [4/6] å•Ÿå‹•å¾Œç«¯ï¼ˆuvicornï¼‰...
+echo( å•Ÿå‹•æ™‚é–“: %DATE% %TIME%
 if not exist "logs" mkdir "logs"
 start "Backend" cmd /k ""%PYEXE%" -m uvicorn xxx:yyy --host 127.0.0.1 --port 8000 --log-level info 1>>"logs\backend.log" 2>>&1"
 
 
-echo( [5/6] «eºİ¥¼°»´ú¨ì¡]¨S¦³ package.json¡A¥B§ä¤£¨ì dist/build/index.html¡^¡A²¤¹L«eºİ±Ò°Ê¡C
-echo( [5/6] ¶}±ÒSlide Manager¹Ï§Î¤¶­±...
+echo( [5/6] å‰ç«¯æœªåµæ¸¬åˆ°ï¼ˆæ²’æœ‰ package.jsonï¼Œä¸”æ‰¾ä¸åˆ° dist/build/index.htmlï¼‰ï¼Œç•¥éå‰ç«¯å•Ÿå‹•ã€‚
+echo( [5/6] é–‹å•ŸSlide Manageråœ–å½¢ä»‹é¢...
 start "Slide Manager GUI" cmd /k "cd /d \"%PROJECT_DIR%\" && call \"%VENV_DIR%\Scripts\activate.bat\" && python -m app.main"
 
 
 
 echo(.
 echo( =========================================
-echo( ±Ò°Ê§¹¦¨¡C­n°±¤îªA°È½ĞÃö³¬ Backend / Frontend µøµ¡¡C
-echo( ­Y¦³¿ù»~¡A½Ğ±N¿ù»~°T®§¦^¶Çµ¹ AI §U¤â¡C
+echo( å•Ÿå‹•å®Œæˆã€‚è¦åœæ­¢æœå‹™è«‹é—œé–‰ Backend / Frontend è¦–çª—ã€‚
+echo( è‹¥æœ‰éŒ¯èª¤ï¼Œè«‹å°‡éŒ¯èª¤è¨Šæ¯å›å‚³çµ¦ AI åŠ©æ‰‹ã€‚
 echo( =========================================
 echo(.
 pause
