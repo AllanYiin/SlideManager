@@ -82,6 +82,10 @@ class ProjectStore:
         self.paths.thumbs_dir.mkdir(parents=True, exist_ok=True)
         self.paths.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def root(self) -> Path:
+        return self.paths.root
+
     # ---------------- Legacy aliases ----------------
     def load_project(self) -> Dict[str, Any]:
         data = read_json(self.paths.project_json, {})
