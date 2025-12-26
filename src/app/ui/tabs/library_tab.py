@@ -658,6 +658,13 @@ class LibraryTab(QWidget):
         scope_only = bool(self._index_status_payload.get("scope_only"))
         legacy_needed = bool(self._index_status_payload.get("legacy_needed")) and not scope_only
         fill_needed = bool(self._index_status_payload.get("fill_needed")) and not scope_only
+        log.info(
+            "[INDEX_FLOW][MODE] scope_only=%s files_count=%d legacy_needed=%s fill_needed=%s",
+            scope_only,
+            len(files),
+            legacy_needed,
+            fill_needed,
+        )
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Question)
@@ -687,24 +694,31 @@ class LibraryTab(QWidget):
         box.exec()
         clicked = box.clickedButton()
         if clicked == btn_cancel:
+            log.info("[INDEX_FLOW][MODE] selection=cancel")
             return None
         if btn_migrate and clicked == btn_migrate:
+            log.info("[INDEX_FLOW][MODE] selection=migrate_legacy")
             self._index_action_inflight = True
             self._run_migrate_legacy_files(files)
             return None
         if btn_fill and clicked == btn_fill:
+            log.info("[INDEX_FLOW][MODE] selection=fill_missing_index_timestamps")
             self._index_action_inflight = True
             self._run_fill_missing_index_timestamps(files)
             return None
         if clicked == btn_text:
+            log.info("[INDEX_FLOW][MODE] selection=text_only")
             return True, False
         if clicked == btn_image:
+            log.info("[INDEX_FLOW][MODE] selection=image_only")
             return False, True
+        log.info("[INDEX_FLOW][MODE] selection=full")
         return True, True
 
     def start_index_needed(self) -> None:
         if not self.ctx:
             return
+        log.info("[INDEX_FLOW][UI] action=start_index_needed")
         self._set_last_action("準備索引（需要者）", lambda: self.start_index_needed())
         self._prepare_index_needed()
 
@@ -752,9 +766,13 @@ class LibraryTab(QWidget):
         self._cancel_prepare = False
 
         def task(_progress_emit, _cancel_flag):
+            log.info("[INDEX_FLOW][PREPARE] step=scan_start source=catalog.scan")
             result = self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10, cancel_flag=_cancel_flag)
             if isinstance(result, dict) and result.get("cancelled"):
+                log.info("[INDEX_FLOW][PREPARE] step=scan_cancelled")
                 return {"cancelled": True}
+            log.info("[INDEX_FLOW][PREPARE] step=scan_done scanned_count=%d", len(result.get("files", [])))
+            log.info("[INDEX_FLOW][PREPARE] step=compute_needed_files_start source=indexer.compute_needed_files")
             return self.ctx.indexer.compute_needed_files()
 
         w = Worker(task)
@@ -766,13 +784,16 @@ class LibraryTab(QWidget):
 
     def _on_prepare_index_needed_done(self, files: List[Dict[str, Any]]) -> None:
         if isinstance(files, dict) and files.get("cancelled"):
+            log.info("[INDEX_FLOW][PREPARE] step=prepare_cancelled")
             self.prog_label.setText("已取消")
             self._reset_prepare_ui()
             return
         if not files:
+            log.info("[INDEX_FLOW][PREPARE] step=no_files_needed")
             self._reset_prepare_ui()
             QMessageBox.information(self, "不需要索引", "目前沒有需要更新的檔案")
             return
+        log.info("[INDEX_FLOW][PREPARE] step=files_needed count=%d", len(files))
         self._request_index_mode(files)
 
     def _prepare_index_selected(self, selected_paths: List[str]) -> None:
@@ -788,13 +809,26 @@ class LibraryTab(QWidget):
             cat = self.ctx.store.load_manifest()
             files = [e for e in cat.get("files", []) if isinstance(e, dict)]
             selected_set = {p for p in selected_paths if p}
+            log.info(
+                "[INDEX_SCOPE][UI] filter=selected_paths before=%d after=%d conditions=abs_path in selected_set",
+                len(files),
+                len(selected_set),
+            )
             selected = []
-            for entry in files:
+            total_entries = len(files)
+            for idx, entry in enumerate(files, start=1):
                 if self._cancel_prepare:
                     return {"cancelled": True}
                 path = entry.get("abs_path")
                 if path and path in selected_set:
                     selected.append(entry)
+                if idx % 50 == 0 or idx == total_entries:
+                    log.info(
+                        "[INDEX_SCOPE][UI] enumerate=manifest.files total=%d current=%d matched=%d",
+                        total_entries,
+                        idx,
+                        len(selected),
+                    )
             log.info("[INDEX_SCOPE][UI] selected_paths=%s", selected_paths)
             log.info(
                 "[INDEX_SCOPE][UI] resolved_selected_files=%s",
@@ -898,7 +932,14 @@ class LibraryTab(QWidget):
                         elif paths.thumbs_dir.exists():
                             if _progress_emit:
                                 _progress_emit({"stage": "thumbs", "message": "正在統計縮圖快取..."})
-                            for idx, thumb in enumerate(paths.thumbs_dir.rglob("*.png"), start=1):
+                            thumb_list = list(paths.thumbs_dir.rglob("*.png"))
+                            total_thumbs = len(thumb_list)
+                            log.info(
+                                "[INDEX_FLOW][PREPARE] enumerate=thumbs_dir.rglob total=%d path=%s",
+                                total_thumbs,
+                                paths.thumbs_dir,
+                            )
+                            for idx, thumb in enumerate(thumb_list, start=1):
                                 if self._cancel_prepare:
                                     return {"ok": False, "cancelled": True}
                                 if thumb.is_file():
@@ -910,8 +951,8 @@ class LibraryTab(QWidget):
                                             "message": f"正在統計縮圖快取... 已掃描 {idx} 筆",
                                         }
                                     )
-                    except Exception as exc:
-                        log.warning("讀取縮圖快取數量失敗：%s", exc)
+                    except Exception:
+                        log.exception("讀取縮圖快取數量失敗")
 
                 def fmt_time(ts: int | None) -> str:
                     if not ts:
@@ -937,7 +978,19 @@ class LibraryTab(QWidget):
                     ("project.json", paths.project_json, paths.app_state_json),
                     ("index.json", paths.index_json, paths.slide_pages_json),
                 ]
-                for legacy_name, legacy_path, new_path in legacy_candidates:
+                total_legacy = len(legacy_candidates)
+                log.info(
+                    "[INDEX_FLOW][PREPARE] enumerate=legacy_candidates total=%d source=_request_index_mode",
+                    total_legacy,
+                )
+                for idx, (legacy_name, legacy_path, new_path) in enumerate(legacy_candidates, start=1):
+                    log.info(
+                        "[INDEX_FLOW][PREPARE] enumerate=legacy_candidates total=%d current=%d legacy=%s new=%s",
+                        total_legacy,
+                        idx,
+                        legacy_path,
+                        new_path,
+                    )
                     if legacy_path.exists() and not new_path.exists():
                         legacy_needed = True
                         legacy_lines.append(f"- {legacy_name} 存在，但 {new_path.name} 缺失")
@@ -948,6 +1001,11 @@ class LibraryTab(QWidget):
                 thumbs_summary = "略過" if scope_only else f"{thumbs_count} 張"
                 scope_file_names = []
 
+                total_scope = len(files)
+                log.info(
+                    "[INDEX_FLOW][PREPARE] enumerate=scope_files total=%d source=_request_index_mode.files",
+                    total_scope,
+                )
                 for idx, entry in enumerate(files, start=1):
 
                     if self._cancel_prepare:
@@ -963,6 +1021,12 @@ class LibraryTab(QWidget):
                                 "stage": "scope",
                                 "message": f"正在整理檔案清單... 已處理 {idx} 筆",
                             }
+                        )
+                    if idx % 50 == 0 or idx == total_scope:
+                        log.info(
+                            "[INDEX_FLOW][PREPARE] enumerate=scope_files total=%d current=%d",
+                            total_scope,
+                            idx,
                         )
                 scope_names_display = "、".join(scope_file_names[:20]) if scope_file_names else "（無）"
                 if len(scope_file_names) > 20:
@@ -1002,6 +1066,7 @@ class LibraryTab(QWidget):
                     "scope_only": scope_only,
                 }
             except Exception as exc:
+                log.exception("整理索引狀態失敗: %s", exc)
                 return {
                     "ok": False,
                     "message": f"整理索引狀態失敗：{exc}",
@@ -1081,16 +1146,28 @@ class LibraryTab(QWidget):
                 legacy_index = store.load_index()
                 legacy_slides = legacy_index.get("slides", {}) if isinstance(legacy_index.get("slides"), dict) else {}
                 slide_pages: Dict[str, str] = {}
-                for slide_id, slide in legacy_slides.items():
+                total_slides = len(legacy_slides)
+                log.info(
+                    "[INDEX_FLOW][MIGRATE] enumerate=legacy_slides total=%d source=index.json",
+                    total_slides,
+                )
+                for idx, (slide_id, slide) in enumerate(legacy_slides.items(), start=1):
                     if self._cancel_prepare:
                         return {"ok": False, "cancelled": True}
                     if not isinstance(slide_id, str) or not isinstance(slide, dict):
                         continue
                     slide_pages[slide_id] = str(slide.get("text_for_bm25") or "")
+                    if idx % 200 == 0 or idx == total_slides:
+                        log.info(
+                            "[INDEX_FLOW][MIGRATE] enumerate=legacy_slides total=%d current=%d",
+                            total_slides,
+                            idx,
+                        )
                 if slide_pages:
                     store.save_slide_pages(slide_pages)
                 return {"ok": True}
             except Exception:
+                log.exception("轉換舊版資料失敗")
                 return {"ok": False, "traceback": traceback.format_exc()}
 
         w = Worker(task)
@@ -1134,17 +1211,30 @@ class LibraryTab(QWidget):
                 else:
                     source_ts = int(datetime.datetime.now().timestamp())
                 updated = 0
-                for entry in entries:
+                total_entries = len(entries)
+                log.info(
+                    "[INDEX_FLOW][FILL] enumerate=manifest.files total=%d source=manifest.json",
+                    total_entries,
+                )
+                for idx, entry in enumerate(entries, start=1):
                     if self._cancel_prepare:
                         return {"ok": False, "cancelled": True}
                     if not entry.get("indexed_at"):
                         entry["indexed_at"] = source_ts
                         updated += 1
+                    if idx % 200 == 0 or idx == total_entries:
+                        log.info(
+                            "[INDEX_FLOW][FILL] enumerate=manifest.files total=%d current=%d updated=%d",
+                            total_entries,
+                            idx,
+                            updated,
+                        )
                 if updated:
                     manifest["files"] = entries
                     store.save_manifest(manifest)
                 return {"ok": True, "updated": updated}
             except Exception:
+                log.exception("補齊索引更新時間失敗")
                 return {"ok": False, "traceback": traceback.format_exc()}
 
         w = Worker(task)
@@ -1177,6 +1267,14 @@ class LibraryTab(QWidget):
         library_roots = self._select_library_roots()
         if not library_roots:
             return
+        log.info(
+            "[INDEX_FLOW][START] scope_only=%s files_count=%d options=text:%s image:%s roots=%s",
+            self._index_status_payload.get("scope_only"),
+            len(files),
+            update_text,
+            update_image,
+            library_roots,
+        )
         if self._index_status_payload.get("scope_only") and files:
             QMessageBox.information(
                 self,
@@ -1246,6 +1344,11 @@ class LibraryTab(QWidget):
     def _start_index_job_for_root(self, library_root: str, options: Dict[str, Any]) -> None:
         if not self.ctx:
             return
+        log.info(
+            "[INDEX_FLOW][START] step=start_index_job root=%s options=%s",
+            library_root,
+            options,
+        )
         self._cancel_index = False
         self._indexing_active = True
         self._job_paused = False
@@ -1260,6 +1363,7 @@ class LibraryTab(QWidget):
         self.prog_label.setText("索引中...")
 
         def task():
+            log.info("[INDEX_FLOW][START] step=ensure_backend_ready")
             if not self.ctx.indexer.ensure_backend_ready():
                 backend_host = get_backend_host()
                 backend_port = get_backend_port()
@@ -1277,6 +1381,7 @@ class LibraryTab(QWidget):
             )
             if not job_id:
                 return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
+            log.info("[INDEX_FLOW][START] step=job_created job_id=%s root=%s", job_id, library_root)
             return {"job_id": job_id, "root": library_root}
 
         w = Worker(task)
@@ -1293,6 +1398,7 @@ class LibraryTab(QWidget):
             error_message = payload.get("error")
             root = payload.get("root")
         if not job_id:
+            log.error("[INDEX_FLOW][START] step=job_start_failed error=%s", error_message)
             self._indexing_active = False
             self.btn_cancel.setEnabled(False)
             self.btn_pause.setEnabled(False)
@@ -1305,6 +1411,7 @@ class LibraryTab(QWidget):
                 self.main_window.show_toast(message, level="error", timeout_ms=12000)
             return
         self._job_id = str(job_id)
+        log.info("[INDEX_FLOW][START] step=job_started job_id=%s root=%s", job_id, root)
         if root and hasattr(self.main_window, "status"):
             self.main_window.status.showMessage(f"正在索引目錄：{root}")
         self.prog_label.setText(f"已送出任務 {job_id}")
@@ -1335,6 +1442,7 @@ class LibraryTab(QWidget):
     def _on_job_event(self, payload: dict) -> None:
         event_type = payload.get("type")
         ev_payload = payload.get("payload") or {}
+        log.info("[INDEX_FLOW][EVENT] type=%s payload_keys=%s", event_type, list(ev_payload.keys()))
         if event_type == "artifact_state_changed":
             file_path = ev_payload.get("file") or ""
             page_no = ev_payload.get("page_no")
@@ -1358,6 +1466,7 @@ class LibraryTab(QWidget):
         self._schedule_job_snapshot()
 
     def _on_job_state(self, state: str) -> None:
+        log.info("[INDEX_FLOW][EVENT] state=%s", state)
         if state in {"reconnecting", "disconnected"}:
             if not self._job_poll_timer.isActive():
                 self._job_poll_timer.start()
@@ -1368,7 +1477,7 @@ class LibraryTab(QWidget):
             self._schedule_job_snapshot()
 
     def _on_job_error(self, message: str) -> None:
-        log.warning("SSE 錯誤：%s", message)
+        log.warning("[INDEX_FLOW][EVENT] SSE 錯誤：%s", message)
         if hasattr(self.main_window, "show_toast"):
             self.main_window.show_toast("事件串流中斷，正在嘗試重連。", level="warning")
 
@@ -1398,6 +1507,7 @@ class LibraryTab(QWidget):
     def _on_job_snapshot(self, payload: object) -> None:
         self._job_poll_inflight = False
         if not isinstance(payload, dict) or not payload.get("ok"):
+            log.warning("[INDEX_FLOW][SNAPSHOT] payload_invalid=%s", payload)
             return
         self._apply_job_snapshot(payload)
 
@@ -1425,13 +1535,25 @@ class LibraryTab(QWidget):
         running = 0
         queued = 0
         error = 0
-        for kind in enabled_kinds:
+        total_kinds = len(enabled_kinds)
+        log.info(
+            "[INDEX_FLOW][SNAPSHOT] enumerate=enabled_kinds total=%d kinds=%s",
+            total_kinds,
+            enabled_kinds,
+        )
+        for idx, kind in enumerate(enabled_kinds, start=1):
             kind_stats = stats.get(kind, {})
             total += sum(int(v) for v in kind_stats.values())
             ready += int(kind_stats.get("ready", 0))
             running += int(kind_stats.get("running", 0))
             queued += int(kind_stats.get("queued", 0))
             error += int(kind_stats.get("error", 0))
+            log.info(
+                "[INDEX_FLOW][SNAPSHOT] enumerate=enabled_kinds total=%d current=%d kind=%s",
+                total_kinds,
+                idx,
+                kind,
+            )
 
         if total > 0:
             percent = int(ready / total * 100)
@@ -1445,6 +1567,14 @@ class LibraryTab(QWidget):
             if error:
                 detail += f"，錯誤 {error}"
             self.prog_label.setText(detail)
+            log.info(
+                "[INDEX_FLOW][SNAPSHOT] progress total=%d ready=%d running=%d queued=%d error=%d",
+                total,
+                ready,
+                running,
+                queued,
+                error,
+            )
 
         now_running = payload.get("now_running") or {}
         if isinstance(now_running, dict) and now_running.get("file_path"):
@@ -1462,6 +1592,7 @@ class LibraryTab(QWidget):
                 "cancelled": "已取消",
                 "failed": "索引失敗",
             }
+            log.info("[INDEX_FLOW][SNAPSHOT] status=%s", status)
             self._finish_job(status_map.get(status, "索引完成"), status=status)
 
     def cancel_indexing(self) -> None:
@@ -1503,6 +1634,7 @@ class LibraryTab(QWidget):
         self._finish_job(msg if code == 0 else "索引完成")
 
     def _finish_job(self, message: str, *, status: str | None = None) -> None:
+        log.info("[INDEX_FLOW][FINISH] status=%s message=%s", status, message)
         self._indexing_active = False
         self._job_id = None
         self._job_paused = False
