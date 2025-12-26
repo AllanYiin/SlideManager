@@ -85,6 +85,14 @@ class SseWorker(QThread):
                             continue
                         if line.startswith("data:"):
                             data_lines.append(line[len("data:") :].strip())
+            except requests.exceptions.ReadTimeout as exc:
+                state = "reconnecting" if self._reconnect else "disconnected"
+                self.state_changed.emit(state)
+                log.info("SSE read timeout: %s", exc)
+                if not self._reconnect:
+                    return
+                time.sleep(min(backoff, 5.0))
+                backoff = min(backoff * 2, 5.0)
             except Exception as exc:
                 state = "reconnecting" if self._reconnect else "disconnected"
                 self.state_changed.emit(state)
