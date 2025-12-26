@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -271,7 +272,7 @@ class JobManager:
             await pause.wait_if_paused()
             await cancel.check()
 
-            aspect = detect_aspect_from_pptx(fs.path)
+            aspect = "unknown"
             cur = self.conn.execute(
                 "SELECT file_id,size_bytes,mtime_epoch FROM files WHERE path=?",
                 (fs.path,),
@@ -280,83 +281,108 @@ class JobManager:
             file_id = self._upsert_file(fs.path, fs.size_bytes, fs.mtime_epoch, aspect)
 
             try:
-                sc = slide_count_fast(fs.path)
+                if not zipfile.is_zipfile(fs.path):
+                    msg = "File is not a zip file"
+                    logger.error("slide_count failed: %s", msg)
+                    self.conn.execute(
+                        "UPDATE files SET scan_error=? WHERE file_id=?",
+                        (msg, file_id),
+                    )
+                    self.conn.commit()
+                    continue
+
+                aspect = detect_aspect_from_pptx(fs.path)
                 self.conn.execute(
-                    "UPDATE files SET slide_count=? WHERE file_id=?",
-                    (sc, file_id),
+                    "UPDATE files SET slide_aspect=? WHERE file_id=?",
+                    (aspect, file_id),
                 )
+
+                try:
+                    sc = slide_count_fast(fs.path)
+                    self.conn.execute(
+                        "UPDATE files SET slide_count=? WHERE file_id=?",
+                        (sc, file_id),
+                    )
+                except Exception as exc:
+                    logger.exception("slide_count failed: %s", exc)
+                    self.conn.execute(
+                        "UPDATE files SET scan_error=? WHERE file_id=?",
+                        (str(exc), file_id),
+                    )
+                    self.conn.commit()
+                    continue
+
+                self.conn.commit()
+
+                page_ids = self._ensure_pages_rows(
+                    file_id, sc, aspect, fs.size_bytes, fs.mtime_epoch
+                )
+                self.conn.commit()
+
+                changed = False
+                if prev is None:
+                    changed = True
+                else:
+                    changed = (
+                        int(prev["size_bytes"]) != fs.size_bytes
+                        or int(prev["mtime_epoch"]) != fs.mtime_epoch
+                    )
+
+                for page_id in page_ids:
+                    if options.enable_text and changed:
+                        self._artifact_set(
+                            job_id,
+                            page_id,
+                            ArtifactKind.TEXT,
+                            ArtifactStatus.QUEUED,
+                            options=params_for_text(options),
+                        )
+                    if options.enable_thumb and options.thumb.enabled and options.pdf.enabled:
+                        if changed:
+                            self._artifact_set(
+                                job_id,
+                                page_id,
+                                ArtifactKind.THUMB,
+                                ArtifactStatus.QUEUED,
+                                options=params_for_thumb(options, aspect),
+                            )
+                    if options.enable_bm25 and changed:
+                        self._artifact_set(
+                            job_id,
+                            page_id,
+                            ArtifactKind.BM25,
+                            ArtifactStatus.QUEUED,
+                            options=params_for_bm25(options),
+                        )
+                    if options.enable_text_vec and options.embed.enabled_text and changed:
+                        self._artifact_set(
+                            job_id,
+                            page_id,
+                            ArtifactKind.TEXT_VEC,
+                            ArtifactStatus.QUEUED,
+                            options=params_for_text_vec(options),
+                        )
+                    if (
+                        options.enable_img_vec
+                        and options.embed.enabled_image
+                        and options.thumb.enabled
+                        and changed
+                    ):
+                        self._artifact_set(
+                            job_id,
+                            page_id,
+                            ArtifactKind.IMG_VEC,
+                            ArtifactStatus.QUEUED,
+                            options=params_for_img_vec(options),
+                        )
             except Exception as exc:
-                logger.exception("slide_count failed: %s", exc)
+                logger.exception("file planning failed: %s", exc)
                 self.conn.execute(
                     "UPDATE files SET scan_error=? WHERE file_id=?",
                     (str(exc), file_id),
                 )
                 self.conn.commit()
                 continue
-
-            self.conn.commit()
-
-            page_ids = self._ensure_pages_rows(
-                file_id, sc, aspect, fs.size_bytes, fs.mtime_epoch
-            )
-            self.conn.commit()
-
-            changed = False
-            if prev is None:
-                changed = True
-            else:
-                changed = (
-                    int(prev["size_bytes"]) != fs.size_bytes
-                    or int(prev["mtime_epoch"]) != fs.mtime_epoch
-                )
-
-            for page_id in page_ids:
-                if options.enable_text and changed:
-                    self._artifact_set(
-                        job_id,
-                        page_id,
-                        ArtifactKind.TEXT,
-                        ArtifactStatus.QUEUED,
-                        options=params_for_text(options),
-                    )
-                if options.enable_thumb and options.thumb.enabled and options.pdf.enabled:
-                    if changed:
-                        self._artifact_set(
-                            job_id,
-                            page_id,
-                            ArtifactKind.THUMB,
-                            ArtifactStatus.QUEUED,
-                            options=params_for_thumb(options, aspect),
-                        )
-                if options.enable_bm25 and changed:
-                    self._artifact_set(
-                        job_id,
-                        page_id,
-                        ArtifactKind.BM25,
-                        ArtifactStatus.QUEUED,
-                        options=params_for_bm25(options),
-                    )
-                if options.enable_text_vec and options.embed.enabled_text and changed:
-                    self._artifact_set(
-                        job_id,
-                        page_id,
-                        ArtifactKind.TEXT_VEC,
-                        ArtifactStatus.QUEUED,
-                        options=params_for_text_vec(options),
-                    )
-                if (
-                    options.enable_img_vec
-                    and options.embed.enabled_image
-                    and options.thumb.enabled
-                    and changed
-                ):
-                    self._artifact_set(
-                        job_id,
-                        page_id,
-                        ArtifactKind.IMG_VEC,
-                        ArtifactStatus.QUEUED,
-                        options=params_for_img_vec(options),
-                    )
 
             if options.pdf.enabled and options.thumb.enabled and changed:
                 self._enqueue_file_task_pdf(job_id, file_id, fs.path, priority=10)
