@@ -15,7 +15,7 @@ class FileScan:
 def scan_files_under(root: Path) -> List[FileScan]:
     out: List[FileScan] = []
 
-    for p in root.rglob("*.pptx"):
+    for p in root.glob("*.pptx"):
         if not p.is_file():
             continue
         try:
