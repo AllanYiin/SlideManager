@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -89,14 +91,37 @@ class IndexService:
         if cancel_flag and cancel_flag():
             return 1, "已取消"
         try:
+            file_paths = [f.get("abs_path") for f in files if f.get("abs_path")]
+            if not file_paths:
+                return 1, "沒有可索引檔案"
+            common_root = Path(os.path.commonpath(file_paths))
+            if common_root.is_file():
+                common_root = common_root.parent
             payload = {
                 "enable_text": update_text,
                 "enable_thumb": update_image,
                 "enable_text_vec": update_text,
                 "enable_img_vec": update_image,
                 "enable_bm25": update_text,
+                "file_paths": file_paths,
             }
-            job_id = self._client.start_index_job(str(self.store.root), "missing_or_changed", payload)
+            file_scans = []
+            for entry in files:
+                path = entry.get("abs_path")
+                size = entry.get("size")
+                mtime = entry.get("modified_time")
+                if not path or size is None or mtime is None:
+                    continue
+                file_scans.append(
+                    {
+                        "path": path,
+                        "size_bytes": int(size),
+                        "mtime_epoch": int(mtime),
+                    }
+                )
+            if file_scans:
+                payload["file_scans"] = file_scans
+            job_id = self._client.start_index_job(str(common_root), "missing_or_changed", payload)
             if not job_id:
                 raise RuntimeError("daemon 未回傳 job_id")
             if on_progress:
