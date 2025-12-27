@@ -315,7 +315,12 @@ class LibraryTab(QWidget):
         self.btn_cancel.setEnabled(True)
 
         def task(_progress_emit, _cancel_flag):
-            return self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10, cancel_flag=_cancel_flag)
+            return self.ctx.catalog.scan(
+                force=True,
+                on_progress=_progress_emit,
+                progress_every=10,
+                cancel_flag=_cancel_flag,
+            )
 
         w = Worker(task)
         w.args = (w.signals.progress.emit, lambda: self._cancel_scan)
@@ -765,24 +770,23 @@ class LibraryTab(QWidget):
     def _prepare_index_needed(self) -> None:
         if not self.ctx:
             return
-        self._set_prepare_ui("正在掃描並整理索引需求...")
+        self._set_prepare_ui("正在整理索引需求（使用上次掃描結果）...")
         self._prepare_scan_count = 0
         self._prepare_in_progress = True
         self._cancel_prepare = False
 
-        def task(_progress_emit, _cancel_flag):
-            log.info("[INDEX_FLOW][PREPARE] step=scan_start source=catalog.scan")
-            result = self.ctx.catalog.scan(on_progress=_progress_emit, progress_every=10, cancel_flag=_cancel_flag)
-            if isinstance(result, dict) and result.get("cancelled"):
-                log.info("[INDEX_FLOW][PREPARE] step=scan_cancelled")
+        def task():
+            if self._cancel_prepare:
                 return {"cancelled": True}
-            log.info("[INDEX_FLOW][PREPARE] step=scan_done scanned_count=%d", len(result.get("files", [])))
+            manifest = self.ctx.store.load_manifest()
+            files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
+            if not files and not manifest.get("scanned_at"):
+                log.info("[INDEX_FLOW][PREPARE] step=manifest_missing_scan")
+                return {"needs_scan": True}
             log.info("[INDEX_FLOW][PREPARE] step=compute_needed_files_start source=indexer.compute_needed_files")
             return self.ctx.indexer.compute_needed_files()
 
         w = Worker(task)
-        w.args = (w.signals.progress.emit, lambda: self._cancel_prepare)
-        w.signals.progress.connect(self._on_prepare_scan_progress)
         w.signals.finished.connect(self._on_prepare_index_needed_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
@@ -792,6 +796,11 @@ class LibraryTab(QWidget):
             log.info("[INDEX_FLOW][PREPARE] step=prepare_cancelled")
             self.prog_label.setText("已取消")
             self._reset_prepare_ui()
+            return
+        if isinstance(files, dict) and files.get("needs_scan"):
+            log.info("[INDEX_FLOW][PREPARE] step=needs_scan")
+            self._reset_prepare_ui()
+            QMessageBox.information(self, "尚未掃描", "目前尚未掃描檔案，請先按下『掃描檔案』更新清單")
             return
         if not files:
             log.info("[INDEX_FLOW][PREPARE] step=no_files_needed")
@@ -845,6 +854,27 @@ class LibraryTab(QWidget):
                     "[INDEX_SCOPE][UI] unmatched_selected_paths=%s",
                     missing_paths,
                 )
+            inconsistent = []
+            for entry in selected:
+                path = entry.get("abs_path")
+                if not path:
+                    continue
+                try:
+                    st = Path(path).stat()
+                except OSError:
+                    inconsistent.append(path)
+                    continue
+                mtime = int(st.st_mtime)
+                size = int(st.st_size)
+                if entry.get("metadata_mtime") != mtime or entry.get("metadata_size") != size:
+                    inconsistent.append(path)
+            if inconsistent:
+                log.warning(
+                    "[INDEX_SCOPE][UI] metadata_inconsistent count=%d paths=%s",
+                    len(inconsistent),
+                    inconsistent,
+                )
+                return {"inconsistent": inconsistent}
             return selected
 
         w = Worker(task)
@@ -856,6 +886,14 @@ class LibraryTab(QWidget):
         if isinstance(files, dict) and files.get("cancelled"):
             self.prog_label.setText("已取消")
             self._reset_prepare_ui()
+            return
+        if isinstance(files, dict) and files.get("inconsistent"):
+            self._reset_prepare_ui()
+            QMessageBox.information(
+                self,
+                "請先掃描",
+                "選取檔案的 metadata 已變更，請先按下『掃描檔案』更新後再索引。",
+            )
             return
         if not files:
             self._reset_prepare_ui()
