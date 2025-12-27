@@ -33,7 +33,7 @@ from app.backend_daemon.rate_limit import DualTokenBucket
 from app.backend_daemon.text_extract import extract_page_text
 from app.backend_daemon.thumb_render import render_pdf_page_to_thumb, thumb_size
 from app.backend_daemon.utils_win import is_windows, which_soffice_windows
-from app.backend_daemon.planner import scan_files_under, scan_specific_files
+from app.backend_daemon.planner import FileScan, scan_files_under, scan_specific_files
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +256,55 @@ class JobManager:
         cancel: CancelToken,
         pause: PauseToken,
     ) -> None:
-        scans = scan_specific_files(options.file_paths) if options.file_paths else scan_files_under(root)
+        scans: List[FileScan] = []
+        if options.file_scans:
+            logger.info(
+                "[INDEX_PLAN] source=frontend_scans file_scans=%d",
+                len(options.file_scans),
+            )
+            total_entries = len(options.file_scans)
+            for idx, entry in enumerate(options.file_scans, start=1):
+                try:
+                    raw_path = getattr(entry, "path", None) or ""
+                    if not raw_path:
+                        continue
+                    p = Path(raw_path)
+                    if p.suffix.lower() not in (".pptx",):
+                        logger.warning(
+                            "[INDEX_PLAN] skip_non_pptx current=%d total=%d path=%s",
+                            idx,
+                            total_entries,
+                            raw_path,
+                        )
+                        continue
+                    scans.append(
+                        FileScan(
+                            path=str(p.resolve()),
+                            size_bytes=int(entry.size_bytes),
+                            mtime_epoch=int(entry.mtime_epoch),
+                        )
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "[INDEX_PLAN] parse_frontend_scan_failed current=%d total=%d error=%s",
+                        idx,
+                        total_entries,
+                        exc,
+                    )
+            logger.info(
+                "[INDEX_PLAN] resolved_frontend_scans total=%d valid=%d",
+                total_entries,
+                len(scans),
+            )
+        if not scans:
+            source = "scan_specific_files" if options.file_paths else "scan_files_under"
+            logger.info(
+                "[INDEX_PLAN] source=%s file_paths=%d root=%s",
+                source,
+                len(options.file_paths),
+                root,
+            )
+            scans = scan_specific_files(options.file_paths) if options.file_paths else scan_files_under(root)
 
         def slide_count_fast(pptx: str) -> int:
             import zipfile
