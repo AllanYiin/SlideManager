@@ -33,7 +33,7 @@ from app.backend_daemon.rate_limit import DualTokenBucket
 from app.backend_daemon.text_extract import extract_page_text
 from app.backend_daemon.thumb_render import render_pdf_page_to_thumb, thumb_size
 from app.backend_daemon.utils_win import is_windows, which_soffice_windows
-from app.backend_daemon.planner import FileScan, scan_files_under, scan_specific_files
+from app.backend_daemon.planner import FileScan, scan_specific_files
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +256,25 @@ class JobManager:
         cancel: CancelToken,
         pause: PauseToken,
     ) -> None:
+        root_resolved = root.resolve()
+        allowed_paths: Optional[set[str]] = None
+        if options.file_paths:
+            allowed_paths = set()
+            for raw in options.file_paths:
+                if not raw:
+                    continue
+                try:
+                    allowed_paths.add(str(Path(raw).resolve()))
+                except Exception:
+                    logger.warning("[INDEX_PLAN] skip_invalid_file_path path=%s", raw)
+
+        def is_under_root(path: Path) -> bool:
+            try:
+                resolved = path.resolve()
+            except Exception:
+                return False
+            return resolved == root_resolved or root_resolved in resolved.parents
+
         scans: List[FileScan] = []
         if options.file_scans:
             logger.info(
@@ -277,9 +296,27 @@ class JobManager:
                             raw_path,
                         )
                         continue
+                    if not is_under_root(p):
+                        logger.warning(
+                            "[INDEX_PLAN] skip_outside_root current=%d total=%d path=%s root=%s",
+                            idx,
+                            total_entries,
+                            raw_path,
+                            root_resolved,
+                        )
+                        continue
+                    resolved_path = str(p.resolve())
+                    if allowed_paths is not None and resolved_path not in allowed_paths:
+                        logger.warning(
+                            "[INDEX_PLAN] skip_unselected_path current=%d total=%d path=%s",
+                            idx,
+                            total_entries,
+                            resolved_path,
+                        )
+                        continue
                     scans.append(
                         FileScan(
-                            path=str(p.resolve()),
+                            path=resolved_path,
                             size_bytes=int(entry.size_bytes),
                             mtime_epoch=int(entry.mtime_epoch),
                         )
@@ -297,14 +334,20 @@ class JobManager:
                 len(scans),
             )
         if not scans:
-            source = "scan_specific_files" if options.file_paths else "scan_files_under"
-            logger.info(
-                "[INDEX_PLAN] source=%s file_paths=%d root=%s",
-                source,
-                len(options.file_paths),
-                root,
-            )
-            scans = scan_specific_files(options.file_paths) if options.file_paths else scan_files_under(root)
+            if options.file_paths:
+                logger.info(
+                    "[INDEX_PLAN] source=frontend_paths file_paths=%d root=%s",
+                    len(options.file_paths),
+                    root,
+                )
+                scans = scan_specific_files(options.file_paths)
+                scans = [fs for fs in scans if is_under_root(Path(fs.path))]
+            else:
+                logger.error(
+                    "[INDEX_PLAN] missing_frontend_inputs file_paths=0 file_scans=0 root=%s",
+                    root,
+                )
+                raise ValueError("missing_frontend_scan_inputs")
 
         def slide_count_fast(pptx: str) -> int:
             import zipfile
