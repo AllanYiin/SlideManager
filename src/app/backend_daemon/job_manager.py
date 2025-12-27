@@ -190,6 +190,7 @@ class JobManager:
         cancel: CancelToken,
         pause: PauseToken,
     ) -> None:
+        await asyncio.sleep(0)
         now = now_epoch()
         self.conn.execute(
             "UPDATE jobs SET status=?, started_at=? WHERE job_id=?",
