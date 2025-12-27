@@ -97,6 +97,9 @@ class LibraryTab(QWidget):
         self._job_paused = False
         self._job_worker = None
         self._job_poll_inflight = False
+        self._job_task_total: Optional[int] = None
+        self._job_task_counts: Dict[str, int] = {}
+        self._job_skip_reported = False
         self._job_poll_timer = QTimer(self)
         self._job_poll_timer.setInterval(2000)
         self._job_poll_timer.timeout.connect(self._poll_job_status)
@@ -1422,6 +1425,9 @@ class LibraryTab(QWidget):
         self._cancel_index = False
         self._indexing_active = True
         self._job_paused = False
+        self._job_task_total = None
+        self._job_task_counts = {}
+        self._job_skip_reported = False
         self.btn_cancel.setEnabled(True)
         self.btn_pause.setEnabled(True)
         self.btn_pause.setText("暫停")
@@ -1545,6 +1551,64 @@ class LibraryTab(QWidget):
             if page_no:
                 msg = f"完成 {kind}：{file_path} (第 {page_no} 頁)"
             self.prog_label.setText(msg)
+        elif event_type == "job_planning_finished":
+            task_total = ev_payload.get("task_total")
+            task_counts = ev_payload.get("task_counts")
+            if isinstance(task_total, int):
+                self._job_task_total = task_total
+            if isinstance(task_counts, dict):
+                self._job_task_counts = {
+                    str(k): int(v) for k, v in task_counts.items() if isinstance(v, int)
+                }
+            skipped = ev_payload.get("skipped")
+            if not self._job_skip_reported and isinstance(skipped, dict):
+                counts = skipped.get("counts")
+                examples = skipped.get("examples")
+                source = skipped.get("source")
+                reason_labels = {
+                    "missing_path": "缺少路徑",
+                    "non_pptx": "非 PPTX 檔",
+                    "outside_root": "不在目錄範圍內",
+                    "unselected_path": "未列入本次選取",
+                    "parse_failed": "資料解析失敗",
+                }
+                total_skipped = 0
+                detail_lines = []
+                if isinstance(counts, dict):
+                    for reason, count in counts.items():
+                        if isinstance(count, int) and count > 0:
+                            total_skipped += count
+                            label = reason_labels.get(str(reason), str(reason))
+                            detail_lines.append(f"{label}：{count}")
+                if source:
+                    detail_lines.append(f"來源：{source}")
+                if total_skipped > 0:
+                    if isinstance(examples, dict):
+                        detail_lines.append("")
+                        for reason, paths in examples.items():
+                            if not isinstance(paths, list) or not paths:
+                                continue
+                            label = reason_labels.get(str(reason), str(reason))
+                            detail_lines.append(f"[{label}]")
+                            detail_lines.extend(str(p) for p in paths)
+                            detail_lines.append("")
+                    detail_text = "\n".join(detail_lines).strip()
+                    msg = f"有 {total_skipped} 筆檔案在規劃階段被排除。"
+                    box = QMessageBox(self)
+                    box.setIcon(QMessageBox.Warning)
+                    box.setWindowTitle("索引規劃排除清單")
+                    box.setText(msg)
+                    if detail_text:
+                        box.setDetailedText(detail_text)
+                    box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    box.exec()
+                    self._job_skip_reported = True
+            if self._job_task_total == 0 and hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(
+                    "本次索引沒有產生可執行任務，可能檔案已索引或索引選項未包含文字/縮圖。",
+                    level="warning",
+                    timeout_ms=12000,
+                )
         elif event_type == "job_completed":
             self._finish_job("索引完成", status="completed")
             return
@@ -1730,6 +1794,8 @@ class LibraryTab(QWidget):
 
     def _finish_job(self, message: str, *, status: str | None = None) -> None:
         log.info("[INDEX_FLOW][FINISH] status=%s message=%s", status, message)
+        if status == "completed" and self._job_task_total == 0:
+            message = "索引完成（本次沒有產生可執行任務）"
         self._indexing_active = False
         self._job_id = None
         self._job_paused = False
