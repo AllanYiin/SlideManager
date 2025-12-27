@@ -268,6 +268,16 @@ class JobManager:
                 except Exception:
                     logger.warning("[INDEX_PLAN] skip_invalid_file_path path=%s", raw)
 
+        skipped_counts: dict[str, int] = {}
+        skipped_examples: dict[str, list[str]] = {}
+        skipped_source: str | None = None
+
+        def record_skip(reason: str, path: str) -> None:
+            skipped_counts[reason] = skipped_counts.get(reason, 0) + 1
+            bucket = skipped_examples.setdefault(reason, [])
+            if len(bucket) < 20 and path:
+                bucket.append(path)
+
         def is_under_root(path: Path) -> bool:
             try:
                 resolved = path.resolve()
@@ -277,6 +287,7 @@ class JobManager:
 
         scans: List[FileScan] = []
         if options.file_scans:
+            skipped_source = "frontend_scans"
             logger.info(
                 "[INDEX_PLAN] source=frontend_scans file_scans=%d",
                 len(options.file_scans),
@@ -286,6 +297,7 @@ class JobManager:
                 try:
                     raw_path = getattr(entry, "path", None) or ""
                     if not raw_path:
+                        record_skip("missing_path", raw_path)
                         continue
                     p = Path(raw_path)
                     if p.suffix.lower() not in (".pptx",):
@@ -295,6 +307,7 @@ class JobManager:
                             total_entries,
                             raw_path,
                         )
+                        record_skip("non_pptx", raw_path)
                         continue
                     if not is_under_root(p):
                         logger.warning(
@@ -304,6 +317,7 @@ class JobManager:
                             raw_path,
                             root_resolved,
                         )
+                        record_skip("outside_root", raw_path)
                         continue
                     resolved_path = str(p.resolve())
                     if allowed_paths is not None and resolved_path not in allowed_paths:
@@ -313,6 +327,7 @@ class JobManager:
                             total_entries,
                             resolved_path,
                         )
+                        record_skip("unselected_path", resolved_path)
                         continue
                     scans.append(
                         FileScan(
@@ -328,6 +343,7 @@ class JobManager:
                         total_entries,
                         exc,
                     )
+                    record_skip("parse_failed", raw_path if "raw_path" in locals() else "")
             logger.info(
                 "[INDEX_PLAN] resolved_frontend_scans total=%d valid=%d",
                 total_entries,
@@ -335,6 +351,7 @@ class JobManager:
             )
         if not scans:
             if options.file_paths:
+                skipped_source = "frontend_paths"
                 logger.info(
                     "[INDEX_PLAN] source=frontend_paths file_paths=%d root=%s",
                     len(options.file_paths),
@@ -492,8 +509,33 @@ class JobManager:
                 self._enqueue_file_task_pdf(job_id, file_id, fs.path, priority=10)
 
         self.conn.commit()
+        task_rows = self.conn.execute(
+            "SELECT kind, COUNT(*) AS cnt FROM tasks WHERE job_id=? GROUP BY kind",
+            (job_id,),
+        ).fetchall()
+        task_counts = {str(r["kind"]): int(r["cnt"]) for r in task_rows}
+        total_tasks = sum(task_counts.values())
+        if total_tasks == 0:
+            logger.warning(
+                "[INDEX_PLAN] no_tasks_created job_id=%s files=%d options=%s",
+                job_id,
+                len(scans),
+                options.model_dump(),
+            )
         await self.bus.publish(
-            job_id, "job_planning_finished", {"files": len(scans)}, ts=now_epoch()
+            job_id,
+            "job_planning_finished",
+            {
+                "files": len(scans),
+                "task_counts": task_counts,
+                "task_total": total_tasks,
+                "skipped": {
+                    "source": skipped_source,
+                    "counts": skipped_counts,
+                    "examples": skipped_examples,
+                },
+            },
+            ts=now_epoch(),
         )
 
     def _upsert_file(
