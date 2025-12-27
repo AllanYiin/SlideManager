@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -21,6 +22,17 @@ def convert_pptx_to_pdf_libreoffice(
     if soffice_path is None:
         soffice_path = "soffice"
 
+    soffice_exec = soffice_path
+    if not Path(soffice_path).is_file():
+        resolved = shutil.which(soffice_path)
+        if resolved:
+            soffice_exec = resolved
+        else:
+            raise RuntimeError(
+                "LibreOffice not found. Please install LibreOffice or configure the "
+                "soffice path before converting PPTX to PDF."
+            )
+
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="lo_profile_") as prof_dir:
@@ -28,7 +40,7 @@ def convert_pptx_to_pdf_libreoffice(
         user_install = f"-env:UserInstallation={_file_url(prof_path)}"
 
         cmd = [
-            soffice_path,
+            soffice_exec,
             "--headless",
             "--nologo",
             "--norestore",
