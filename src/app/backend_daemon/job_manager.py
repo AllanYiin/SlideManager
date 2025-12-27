@@ -658,7 +658,9 @@ class JobManager:
 
             self._task_start(task_id)
             try:
-                raw, norm, sig = extract_page_text(pptx_path, page_no)
+                raw, norm, sig = await asyncio.to_thread(
+                    extract_page_text, pptx_path, page_no
+                )
                 now = now_epoch()
                 self.conn.execute(
                     "INSERT INTO page_text(page_id,raw_text,norm_text,text_sig,updated_at) VALUES (?,?,?,?,?) "
@@ -754,8 +756,12 @@ class JobManager:
 
             self._task_start(task_id)
             try:
-                convert_pptx_to_pdf_libreoffice(
-                    pptx_path, out_pdf, soffice, options.pdf.timeout_sec
+                await asyncio.to_thread(
+                    convert_pptx_to_pdf_libreoffice,
+                    pptx_path,
+                    out_pdf,
+                    soffice,
+                    options.pdf.timeout_sec,
                 )
                 self._task_finish_ok(task_id)
                 self.conn.commit()
@@ -808,7 +814,14 @@ class JobManager:
 
                 self._task_start(tt_id)
                 try:
-                    render_pdf_page_to_thumb(out_pdf, page_no - 1, out_img, w, h)
+                    await asyncio.to_thread(
+                        render_pdf_page_to_thumb,
+                        out_pdf,
+                        page_no - 1,
+                        out_img,
+                        w,
+                        h,
+                    )
                     now2 = now_epoch()
                     self.conn.execute(
                         "INSERT OR REPLACE INTO thumbnails(page_id,aspect,width,height,image_path,updated_at) VALUES (?,?,?,?,?,?)",
