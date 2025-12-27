@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
@@ -107,6 +107,7 @@ class LibraryTab(QWidget):
         self._pending_index_roots: List[str] = []
         self._pending_index_options: Dict[str, Any] = {}
         self._pending_index_files_by_root: Dict[str, List[str]] = {}
+        self._pending_index_scans_by_root: Dict[str, List[Dict[str, Any]]] = {}
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -1284,6 +1285,7 @@ class LibraryTab(QWidget):
             "enable_bm25": update_text,
         }
         file_paths = [f.get("abs_path") for f in files if f.get("abs_path")]
+        file_entries_by_path = {f.get("abs_path"): f for f in files if f.get("abs_path")}
         if len(library_roots) > 1 and hasattr(self.main_window, "show_toast"):
             self.main_window.show_toast(
                 f"偵測到多個目錄，將依序索引 {len(library_roots)} 個。",
@@ -1292,6 +1294,7 @@ class LibraryTab(QWidget):
             )
         roots_with_files: List[str] = []
         files_by_root: Dict[str, List[str]] = {}
+        file_scans_by_root: Dict[str, List[Dict[str, Any]]] = {}
         for root in library_roots:
             root_path = Path(root)
             scoped = []
@@ -1304,6 +1307,45 @@ class LibraryTab(QWidget):
             if scoped:
                 roots_with_files.append(root)
                 files_by_root[root] = scoped
+                scoped_scans: List[Dict[str, Any]] = []
+                total_scoped = len(scoped)
+                for idx, path in enumerate(scoped, start=1):
+                    try:
+                        entry = file_entries_by_path.get(path)
+                        if not entry:
+                            continue
+                        size = entry.get("size")
+                        mtime = entry.get("modified_time")
+                        if size is None or mtime is None:
+                            log.warning(
+                                "[INDEX_FLOW][START] skip_frontend_scan_missing_fields current=%d total=%d path=%s",
+                                idx,
+                                total_scoped,
+                                path,
+                            )
+                            continue
+                        scoped_scans.append(
+                            {
+                                "path": path,
+                                "size_bytes": int(size),
+                                "mtime_epoch": int(mtime),
+                            }
+                        )
+                    except Exception as exc:
+                        log.exception(
+                            "[INDEX_FLOW][START] build_frontend_scan_failed current=%d total=%d path=%s error=%s",
+                            idx,
+                            total_scoped,
+                            path,
+                            exc,
+                        )
+                file_scans_by_root[root] = scoped_scans
+                log.info(
+                    "[INDEX_FLOW][START] scoped_frontend_scans root=%s total=%d valid=%d",
+                    root,
+                    total_scoped,
+                    len(scoped_scans),
+                )
 
         if not roots_with_files:
             QMessageBox.information(self, "沒有可索引檔案", "目前沒有符合條件的 PPTX 檔案可索引。")
@@ -1313,7 +1355,13 @@ class LibraryTab(QWidget):
         self._pending_index_roots = list(roots_with_files[1:])
         self._pending_index_options = dict(options)
         self._pending_index_files_by_root = files_by_root
-        self._start_index_job_for_root(roots_with_files[0], options, files_by_root[roots_with_files[0]])
+        self._pending_index_scans_by_root = file_scans_by_root
+        self._start_index_job_for_root(
+            roots_with_files[0],
+            options,
+            files_by_root[roots_with_files[0]],
+            file_scans_by_root.get(roots_with_files[0], []),
+        )
 
     def _on_index_progress(self, p: object) -> None:
         try:
@@ -1362,6 +1410,7 @@ class LibraryTab(QWidget):
         library_root: str,
         options: Dict[str, Any],
         file_paths: List[str],
+        file_scans: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         if not self.ctx:
             return
@@ -1384,26 +1433,38 @@ class LibraryTab(QWidget):
         self.prog_label.setText("索引中...")
 
         def task():
-            log.info("[INDEX_FLOW][START] step=ensure_backend_ready")
-            if not self.ctx.indexer.ensure_backend_ready():
-                backend_host = get_backend_host()
-                backend_port = get_backend_port()
-                return {
-                    "job_id": None,
-                    "error": (
-                        f"無法連線後台 daemon（{backend_host}:{backend_port}）。"
-                        "請確認 daemon 是否已啟動。"
-                    ),
-                }
-            job_id = self.ctx.indexer.start_index_job(
-                library_root,
-                plan_mode="missing_or_changed",
-                options={**options, "file_paths": file_paths},
-            )
-            if not job_id:
-                return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
-            log.info("[INDEX_FLOW][START] step=job_created job_id=%s root=%s", job_id, library_root)
-            return {"job_id": job_id, "root": library_root}
+            try:
+                log.info("[INDEX_FLOW][START] step=ensure_backend_ready")
+                if not self.ctx.indexer.ensure_backend_ready():
+                    backend_host = get_backend_host()
+                    backend_port = get_backend_port()
+                    return {
+                        "job_id": None,
+                        "error": (
+                            f"無法連線後台 daemon（{backend_host}:{backend_port}）。"
+                            "請確認 daemon 是否已啟動。"
+                        ),
+                    }
+                payload = {**options, "file_paths": file_paths}
+                if file_scans:
+                    payload["file_scans"] = list(file_scans)
+                log.info(
+                    "[INDEX_FLOW][START] step=job_payload_ready file_paths=%d file_scans=%d",
+                    len(file_paths),
+                    len(file_scans or []),
+                )
+                job_id = self.ctx.indexer.start_index_job(
+                    library_root,
+                    plan_mode="missing_or_changed",
+                    options=payload,
+                )
+                if not job_id:
+                    return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
+                log.info("[INDEX_FLOW][START] step=job_created job_id=%s root=%s", job_id, library_root)
+                return {"job_id": job_id, "root": library_root}
+            except Exception as exc:
+                log.exception("[INDEX_FLOW][START] step=job_create_failed error=%s", exc)
+                return {"job_id": None, "error": f"啟動後台任務失敗：{exc}"}
 
         w = Worker(task)
         w.signals.finished.connect(self._on_job_started)
@@ -1621,6 +1682,7 @@ class LibraryTab(QWidget):
         self._cancel_scan = True
         self._cancel_prepare = True
         self._pending_index_roots = []
+        self._pending_index_scans_by_root = {}
         if self._job_id and self.ctx:
             ok = self.ctx.indexer.cancel_job(self._job_id)
             if not ok and hasattr(self.main_window, "show_toast"):
@@ -1694,12 +1756,15 @@ class LibraryTab(QWidget):
                         timeout_ms=8000,
                     )
                 file_paths = self._pending_index_files_by_root.get(next_root, [])
-                self._start_index_job_for_root(next_root, options, file_paths)
+                file_scans = self._pending_index_scans_by_root.get(next_root, [])
+                self._start_index_job_for_root(next_root, options, file_paths, file_scans)
         elif status in {"failed", "cancelled"}:
             self._pending_index_roots = []
             self._pending_index_files_by_root = {}
+            self._pending_index_scans_by_root = {}
         elif status == "completed" and not self._pending_index_roots:
             self._pending_index_files_by_root = {}
+            self._pending_index_scans_by_root = {}
 
     def _on_error(self, tb: str) -> None:
         log.error("背景任務錯誤\n%s", tb)

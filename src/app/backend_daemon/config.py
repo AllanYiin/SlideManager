@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 Aspect = Literal["4:3", "16:9", "unknown"]
 
 
+class FileScanInput(BaseModel):
+    path: str
+    size_bytes: int
+    mtime_epoch: int
+
+
 class ThumbConfig(BaseModel):
     enabled: bool = True
     width: int = 320
@@ -41,6 +47,7 @@ class JobOptions(BaseModel):
     enable_img_vec: bool = True
     enable_bm25: bool = True
     file_paths: list[str] = Field(default_factory=list)
+    file_scans: list[FileScanInput] = Field(default_factory=list)
     thumb: ThumbConfig = Field(default_factory=ThumbConfig)
     pdf: PdfConfig = Field(default_factory=PdfConfig)
     embed: EmbedConfig = Field(default_factory=EmbedConfig)
