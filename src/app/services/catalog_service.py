@@ -57,12 +57,6 @@ def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
         root,
     )
     for dir_index, (current_root, dirnames, filenames) in enumerate(walk_items, start=1):
-        log.info(
-            "[SCAN_FILES] enumerate=os.walk total=%d current=%d dir=%s",
-            total_dirs,
-            dir_index,
-            current_root,
-        )
         filtered_dirs = [d for d in dirnames if d.casefold() not in _SKIP_DIR_NAMES]
         if len(filtered_dirs) != len(dirnames):
             skipped = sorted(set(dirnames) - set(filtered_dirs))
@@ -73,14 +67,7 @@ def _iter_pptx_files(root: Path, recursive: bool) -> List[Path]:
                 skipped_paths or ", ".join(skipped),
             )
         dirnames[:] = filtered_dirs
-        total_files = len(filenames)
-        for file_index, name in enumerate(filenames, start=1):
-            log.info(
-                "[SCAN_FILES] enumerate=filenames total=%d current=%d dir=%s",
-                total_files,
-                file_index,
-                current_root,
-            )
+        for name in filenames:
             if name.lower().endswith(".pptx"):
                 files.append(Path(current_root) / name)
     return files
@@ -237,18 +224,11 @@ class CatalogService:
                     total_candidates,
                     root,
                 )
-                for file_index, path in enumerate(file_candidates, start=1):
+                for path in file_candidates:
                     if cancel_flag and cancel_flag():
                         log.info("掃描已取消")
                         return {"cancelled": True}
-                    log.info(
-                        "[SCAN] enumerate=_iter_pptx_files total=%d current=%d path=%s",
-                        total_candidates,
-                        file_index,
-                        path,
-                    )
                     if path.name.startswith("~$"):
-                        log.info("[SCAN] skip_temp_file path=%s", path)
                         continue
                     try:
                         st = path.stat()
