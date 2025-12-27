@@ -68,12 +68,33 @@ class IndexService:
             manifest = self.store.load_manifest()
             files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
             filtered = [f for f in files if not f.get("missing")]
+            required = []
+            for entry in filtered:
+                indexed_at = entry.get("indexed_at")
+                modified_time = entry.get("modified_time")
+                is_indexed = bool(entry.get("indexed"))
+                if not is_indexed or indexed_at is None:
+                    required.append(entry)
+                    continue
+                try:
+                    indexed_at_int = int(indexed_at)
+                    modified_time_int = int(modified_time) if modified_time is not None else None
+                except (TypeError, ValueError):
+                    required.append(entry)
+                    continue
+                if modified_time_int is None or indexed_at_int < modified_time_int:
+                    required.append(entry)
             logger.info(
                 "[INDEX_FLOW][NEEDED] filter=missing before=%d after=%d conditions=missing is False",
                 len(files),
                 len(filtered),
             )
-            return filtered
+            logger.info(
+                "[INDEX_FLOW][NEEDED] filter=index_stale before=%d after=%d conditions=indexed_at < modified_time or indexed is False",
+                len(filtered),
+                len(required),
+            )
+            return required
         except Exception as exc:
             logger.exception("讀取需要索引的檔案失敗: %s", exc)
             return []

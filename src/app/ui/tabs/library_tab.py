@@ -1448,6 +1448,18 @@ class LibraryTab(QWidget):
                 payload = {**options, "file_paths": file_paths}
                 if file_scans:
                     payload["file_scans"] = list(file_scans)
+                    log.info(
+                        "[INDEX_FLOW][START] step=file_scans_ready count=%d items=%s",
+                        len(file_scans),
+                        [
+                            {
+                                "path": item.get("path"),
+                                "size_bytes": item.get("size_bytes"),
+                                "mtime_epoch": item.get("mtime_epoch"),
+                            }
+                            for item in file_scans
+                        ],
+                    )
                 log.info(
                     "[INDEX_FLOW][START] step=job_payload_ready file_paths=%d file_scans=%d",
                     len(file_paths),
