@@ -83,6 +83,9 @@ class JobManager:
         self._jobs: Dict[str, Dict[str, object]] = {}
         self._lock = asyncio.Lock()
         self._watchdog_task: Optional[asyncio.Task] = None
+        self._image_embedder = None
+        self._image_embedder_info: dict[str, object] | None = None
+        self._image_embedder_path: Path | None = None
 
     async def start_watchdog(self) -> None:
         if self._watchdog_task is None:
@@ -223,8 +226,9 @@ class JobManager:
 
         try:
             await self._run_text_and_bm25(job_id, options, cancel, pause)
-            await self._run_pdf_and_thumbs(job_id, root, options, cancel, pause)
             await self._run_text_embeddings(job_id, options, cancel, pause)
+            await self._run_pdf_and_thumbs(job_id, root, options, cancel, pause)
+            await self._run_image_embeddings(job_id, root, options, cancel, pause)
             await cancel.check()
         except asyncio.CancelledError:
             self._finalize_cancel(job_id)
@@ -469,8 +473,7 @@ class JobManager:
                             )
                             need_pdf = True
                     if options.enable_bm25 and bm25_needed:
-                        self._artifact_set(
-                            job_id,
+                        self._artifact_mark(
                             page_id,
                             ArtifactKind.BM25,
                             ArtifactStatus.QUEUED,
@@ -628,6 +631,15 @@ class JobManager:
         self.conn.execute(
             "INSERT INTO tasks(job_id,page_id,kind,status,priority) VALUES (?,?,?,?,?)",
             (job_id, page_id, str(kind), TaskStatus.QUEUED, 0),
+        )
+
+    def _artifact_mark(
+        self, page_id: int, kind: ArtifactKind, status: ArtifactStatus, options: dict
+    ) -> None:
+        now = now_epoch()
+        self.conn.execute(
+            "UPDATE artifacts SET status=?, updated_at=?, params_json=? WHERE page_id=? AND kind=?",
+            (status, now, json.dumps(options, ensure_ascii=False), page_id, str(kind)),
         )
 
     def _enqueue_file_task_pdf(self, job_id: str, file_id: int, path: str, priority: int) -> None:
@@ -1006,6 +1018,225 @@ class JobManager:
             self.conn.commit()
             i += len(batch)
 
+    async def _run_image_embeddings(
+        self, job_id: str, root: Path, options: JobOptions, cancel: CancelToken, pause: PauseToken
+    ) -> None:
+        if not (options.enable_img_vec and options.embed.enabled_image):
+            return
+
+        rows = self.conn.execute(
+            "SELECT t.task_id, t.page_id, p.page_no, f.path "
+            "FROM tasks t "
+            "JOIN pages p ON p.page_id=t.page_id "
+            "JOIN files f ON f.file_id=p.file_id "
+            "WHERE t.job_id=? AND t.kind=? AND t.status=? "
+            "ORDER BY t.task_id ASC",
+            (job_id, ArtifactKind.IMG_VEC, TaskStatus.QUEUED),
+        ).fetchall()
+        if not rows:
+            return
+
+        embedder = self._get_image_embedder(root)
+        if embedder is None:
+            logger.warning("img_vec skipped: missing onnx model in cache/")
+            now = now_epoch()
+            for r in rows:
+                task_id = int(r["task_id"])
+                page_id = int(r["page_id"])
+                self._task_start(task_id)
+                self.conn.execute(
+                    "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=?, attempts=attempts+1 "
+                    "WHERE page_id=? AND kind=?",
+                    (
+                        ArtifactStatus.SKIPPED,
+                        now,
+                        "IMG_VEC_SKIPPED",
+                        "missing onnx model",
+                        page_id,
+                        ArtifactKind.IMG_VEC,
+                    ),
+                )
+                self._task_finish_skip(task_id, "missing onnx model")
+            self.conn.commit()
+            return
+
+        session, info = embedder
+        model_id = str(info["model_id"])
+        input_name = str(info["input_name"])
+        output_name = str(info["output_name"])
+        width = int(info["width"])
+        height = int(info["height"])
+        channels_first = bool(info["channels_first"])
+
+        processed = 0
+        last_commit_ts = time.monotonic()
+        for r in rows:
+            await pause.wait_if_paused()
+            await cancel.check()
+
+            task_id = int(r["task_id"])
+            page_id = int(r["page_id"])
+            pptx_path = str(r["path"])
+            page_no = int(r["page_no"])
+
+            self._task_start(task_id)
+            thumb_row = self.conn.execute(
+                "SELECT image_path FROM thumbnails WHERE page_id=? ORDER BY updated_at DESC LIMIT 1",
+                (page_id,),
+            ).fetchone()
+            if thumb_row is None:
+                now = now_epoch()
+                self.conn.execute(
+                    "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=?, attempts=attempts+1 "
+                    "WHERE page_id=? AND kind=?",
+                    (
+                        ArtifactStatus.SKIPPED,
+                        now,
+                        "THUMB_MISSING",
+                        "thumbnail missing",
+                        page_id,
+                        ArtifactKind.IMG_VEC,
+                    ),
+                )
+                self._task_finish_skip(task_id, "thumb missing")
+                self.conn.commit()
+                continue
+
+            thumb_path = str(thumb_row["image_path"])
+            try:
+                vec = await asyncio.to_thread(
+                    self._embed_image_onnx,
+                    session,
+                    input_name,
+                    output_name,
+                    thumb_path,
+                    width,
+                    height,
+                    channels_first,
+                )
+                now = now_epoch()
+                vb = pack_f32(vec)
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO page_image_embedding(page_id,model,dim,vector_blob,updated_at) VALUES (?,?,?,?,?)",
+                    (page_id, model_id, len(vec), vb, now),
+                )
+                self.conn.execute(
+                    "UPDATE artifacts SET status=?, updated_at=?, attempts=attempts+1 WHERE page_id=? AND kind=?",
+                    (ArtifactStatus.READY, now, page_id, ArtifactKind.IMG_VEC),
+                )
+                self._task_finish_ok(task_id)
+
+                processed += 1
+                if processed % options.commit_every_pages == 0 or (
+                    time.monotonic() - last_commit_ts
+                ) >= options.commit_every_sec:
+                    self.conn.commit()
+                    last_commit_ts = time.monotonic()
+
+                await self.bus.publish(
+                    job_id,
+                    "artifact_state_changed",
+                    {
+                        "page_id": page_id,
+                        "kind": "img_vec",
+                        "status": "ready",
+                        "file": pptx_path,
+                        "page_no": page_no,
+                    },
+                    ts=now_epoch(),
+                )
+            except Exception as exc:
+                now = now_epoch()
+                logger.exception("image embedding failed: %s", exc)
+                self.conn.execute(
+                    "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=?, attempts=attempts+1 "
+                    "WHERE page_id=? AND kind=?",
+                    (
+                        ArtifactStatus.ERROR,
+                        now,
+                        "IMG_VEC_FAIL",
+                        str(exc)[:500],
+                        page_id,
+                        ArtifactKind.IMG_VEC,
+                    ),
+                )
+                self._task_finish_err(task_id, "IMG_VEC_FAIL", str(exc))
+                self.conn.commit()
+                continue
+
+        self.conn.commit()
+
+    def _get_image_embedder(self, root: Path) -> tuple[object, dict[str, object]] | None:
+        model_path = root / "cache" / "image_embedder.onnx"
+        if not model_path.exists():
+            return None
+        if self._image_embedder is not None and self._image_embedder_path == model_path:
+            return self._image_embedder, dict(self._image_embedder_info or {})
+
+        import onnxruntime as ort
+
+        session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        inputs = session.get_inputs()
+        outputs = session.get_outputs()
+        if not inputs or not outputs:
+            logger.warning("image embedder has no inputs/outputs: %s", model_path)
+            return None
+        input_info = inputs[0]
+        output_info = outputs[0]
+        shape = list(input_info.shape)
+        if len(shape) != 4:
+            logger.warning("image embedder input must be 4D: %s", shape)
+            return None
+
+        channels_first = False
+        if shape[1] == 3:
+            channels_first = True
+            height = shape[2] or 224
+            width = shape[3] or 224
+        elif shape[3] == 3:
+            channels_first = False
+            height = shape[1] or 224
+            width = shape[2] or 224
+        else:
+            logger.warning("image embedder expects 3-channel input: %s", shape)
+            return None
+
+        info = {
+            "input_name": input_info.name,
+            "output_name": output_info.name,
+            "width": int(width),
+            "height": int(height),
+            "channels_first": channels_first,
+            "model_id": f"onnx:{model_path.name}",
+        }
+        self._image_embedder = session
+        self._image_embedder_info = info
+        self._image_embedder_path = model_path
+        return session, dict(info)
+
+    def _embed_image_onnx(
+        self,
+        session: object,
+        input_name: str,
+        output_name: str,
+        image_path: str,
+        width: int,
+        height: int,
+        channels_first: bool,
+    ) -> List[float]:
+        import numpy as np
+        from PIL import Image
+
+        img = Image.open(image_path).convert("RGB")
+        img = img.resize((width, height), Image.BICUBIC)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        if channels_first:
+            arr = np.transpose(arr, (2, 0, 1))
+        arr = np.expand_dims(arr, axis=0).astype(np.float32)
+        output = session.run([output_name], {input_name: arr})[0]
+        vec = np.asarray(output, dtype=np.float32).reshape(-1)
+        return vec.tolist()
+
     def _upsert_text_vec_cache_and_link(
         self,
         page_id: int,
@@ -1049,6 +1280,13 @@ class JobManager:
         self.conn.execute(
             "UPDATE tasks SET status=?, finished_at=?, heartbeat_at=?, progress=?, message=? WHERE task_id=?",
             (TaskStatus.SUCCEEDED, now, now, 1.0, "ok", task_id),
+        )
+
+    def _task_finish_skip(self, task_id: int, message: str) -> None:
+        now = now_epoch()
+        self.conn.execute(
+            "UPDATE tasks SET status=?, finished_at=?, heartbeat_at=?, progress=?, message=? WHERE task_id=?",
+            (TaskStatus.SKIPPED, now, now, 1.0, message, task_id),
         )
 
     def _task_finish_err(self, task_id: int, code: str, msg: str) -> None:
