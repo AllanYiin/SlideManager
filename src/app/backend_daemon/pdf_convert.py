@@ -27,11 +27,6 @@ def convert_pptx_to_pdf_libreoffice(
         resolved = shutil.which(soffice_path)
         if resolved:
             soffice_exec = resolved
-        else:
-            raise RuntimeError(
-                "LibreOffice not found. Please install LibreOffice or configure the "
-                "soffice path before converting PPTX to PDF."
-            )
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
@@ -57,13 +52,19 @@ def convert_pptx_to_pdf_libreoffice(
         if is_windows():
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            creationflags=creationflags,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=creationflags,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "LibreOffice not found. Please install LibreOffice or configure the "
+                "soffice path before converting PPTX to PDF."
+            ) from exc
         try:
             _stdout, stderr = proc.communicate(timeout=timeout_sec)
         except subprocess.TimeoutExpired as exc:
