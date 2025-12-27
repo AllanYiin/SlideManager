@@ -14,12 +14,37 @@ class FileScan:
 
 def scan_files_under(root: Path) -> List[FileScan]:
     out: List[FileScan] = []
-    for p in root.glob("*.pptx"):
+
+    for p in root.rglob("*.pptx"):
         if not p.is_file():
             continue
-        if p.parent != root:
+        try:
+            st = p.stat()
+        except OSError:
             continue
-        st = p.stat()
+        out.append(
+            FileScan(
+                path=str(p.resolve()),
+                size_bytes=st.st_size,
+                mtime_epoch=int(st.st_mtime),
+            )
+        )
+    return out
+
+
+def scan_specific_files(paths: list[str]) -> List[FileScan]:
+    out: List[FileScan] = []
+    for raw in paths:
+        if not raw:
+            continue
+        p = Path(raw)
+        if not (p.is_file() and p.suffix.lower() in (".pptx",)):
+
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
         out.append(
             FileScan(
                 path=str(p.resolve()),

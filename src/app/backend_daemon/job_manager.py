@@ -33,7 +33,7 @@ from app.backend_daemon.rate_limit import DualTokenBucket
 from app.backend_daemon.text_extract import extract_page_text
 from app.backend_daemon.thumb_render import render_pdf_page_to_thumb, thumb_size
 from app.backend_daemon.utils_win import is_windows, which_soffice_windows
-from app.backend_daemon.planner import scan_files_under
+from app.backend_daemon.planner import scan_files_under, scan_specific_files
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +256,7 @@ class JobManager:
         cancel: CancelToken,
         pause: PauseToken,
     ) -> None:
-        scans = scan_files_under(root)
+        scans = scan_specific_files(options.file_paths) if options.file_paths else scan_files_under(root)
 
         def slide_count_fast(pptx: str) -> int:
             import zipfile

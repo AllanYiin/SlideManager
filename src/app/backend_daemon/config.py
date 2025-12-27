@@ -40,6 +40,7 @@ class JobOptions(BaseModel):
     enable_text_vec: bool = True
     enable_img_vec: bool = True
     enable_bm25: bool = True
+    file_paths: list[str] = Field(default_factory=list)
     thumb: ThumbConfig = Field(default_factory=ThumbConfig)
     pdf: PdfConfig = Field(default_factory=PdfConfig)
     embed: EmbedConfig = Field(default_factory=EmbedConfig)
