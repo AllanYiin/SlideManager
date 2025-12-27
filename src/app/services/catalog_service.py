@@ -91,6 +91,14 @@ class CatalogService:
     def __init__(self, store: ProjectStore):
         self.store = store
 
+    def _should_skip_scan(self) -> bool:
+        manifest = self.store.load_manifest()
+        try:
+            scanned_at = int(manifest.get("scanned_at") or 0)
+        except (TypeError, ValueError):
+            return False
+        return scanned_at > 0 and int(time.time()) - scanned_at < 3600
+
     def _normalize_dir(self, dir_path: str) -> str:
         return str(Path(dir_path).resolve())
 
@@ -160,11 +168,15 @@ class CatalogService:
     def scan(
         self,
         *,
+        force: bool = False,
         on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
         progress_every: int = 10,
         cancel_flag: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """掃描白名單目錄，更新 manifest.json。"""
+        if not force and self._should_skip_scan():
+            log.info("[SCAN] skip_recent_scan reason=within_1h")
+            return self.store.load_manifest()
         whitelist = self._load_whitelist()
         log.info("[SCAN] start whitelist_count=%d", len(whitelist))
         existing = self.store.load_manifest().get("files", [])
