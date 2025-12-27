@@ -33,7 +33,7 @@ from app.backend_daemon.rate_limit import DualTokenBucket
 from app.backend_daemon.text_extract import extract_page_text
 from app.backend_daemon.thumb_render import render_pdf_page_to_thumb, thumb_size
 from app.backend_daemon.utils_win import is_windows, which_soffice_windows
-from app.backend_daemon.planner import scan_files_under
+from app.backend_daemon.planner import scan_files_under, scan_specific_files
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +256,7 @@ class JobManager:
         cancel: CancelToken,
         pause: PauseToken,
     ) -> None:
-        scans = scan_files_under(root)
+        scans = scan_specific_files(options.file_paths) if options.file_paths else scan_files_under(root)
 
         def slide_count_fast(pptx: str) -> int:
             import zipfile
@@ -328,8 +328,20 @@ class JobManager:
                         or int(prev["mtime_epoch"]) != fs.mtime_epoch
                     )
 
+                need_pdf = False
                 for page_id in page_ids:
-                    if options.enable_text and changed:
+                    status_map = self._artifact_status_map(page_id)
+                    text_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.TEXT)), changed)
+                    thumb_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.THUMB)), changed)
+                    bm25_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.BM25)), changed)
+                    text_vec_needed = self._artifact_needs_refresh(
+                        status_map.get(str(ArtifactKind.TEXT_VEC)), changed
+                    )
+                    img_vec_needed = self._artifact_needs_refresh(
+                        status_map.get(str(ArtifactKind.IMG_VEC)), changed
+                    )
+
+                    if options.enable_text and text_needed:
                         self._artifact_set(
                             job_id,
                             page_id,
@@ -338,7 +350,7 @@ class JobManager:
                             options=params_for_text(options),
                         )
                     if options.enable_thumb and options.thumb.enabled and options.pdf.enabled:
-                        if changed:
+                        if thumb_needed:
                             self._artifact_set(
                                 job_id,
                                 page_id,
@@ -346,7 +358,8 @@ class JobManager:
                                 ArtifactStatus.QUEUED,
                                 options=params_for_thumb(options, aspect),
                             )
-                    if options.enable_bm25 and changed:
+                            need_pdf = True
+                    if options.enable_bm25 and bm25_needed:
                         self._artifact_set(
                             job_id,
                             page_id,
@@ -354,7 +367,7 @@ class JobManager:
                             ArtifactStatus.QUEUED,
                             options=params_for_bm25(options),
                         )
-                    if options.enable_text_vec and options.embed.enabled_text and changed:
+                    if options.enable_text_vec and options.embed.enabled_text and text_vec_needed:
                         self._artifact_set(
                             job_id,
                             page_id,
@@ -366,7 +379,7 @@ class JobManager:
                         options.enable_img_vec
                         and options.embed.enabled_image
                         and options.thumb.enabled
-                        and changed
+                        and img_vec_needed
                     ):
                         self._artifact_set(
                             job_id,
@@ -384,7 +397,7 @@ class JobManager:
                 self.conn.commit()
                 continue
 
-            if options.pdf.enabled and options.thumb.enabled and changed:
+            if options.pdf.enabled and options.thumb.enabled and (changed or need_pdf):
                 self._enqueue_file_task_pdf(job_id, file_id, fs.path, priority=10)
 
         self.conn.commit()
@@ -455,6 +468,20 @@ class JobManager:
                 )
 
         return page_ids
+
+    def _artifact_status_map(self, page_id: int) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT kind, status FROM artifacts WHERE page_id=?",
+            (page_id,),
+        ).fetchall()
+        return {str(r["kind"]): str(r["status"]) for r in rows}
+
+    def _artifact_needs_refresh(self, status: str | None, changed: bool) -> bool:
+        if changed:
+            return True
+        if status is None:
+            return True
+        return status not in {ArtifactStatus.READY, ArtifactStatus.SKIPPED}
 
     def _artifact_set(
         self, job_id: str, page_id: int, kind: ArtifactKind, status: ArtifactStatus, options: dict

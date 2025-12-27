@@ -106,6 +106,7 @@ class LibraryTab(QWidget):
         self._job_snapshot_timer.timeout.connect(self._request_job_snapshot)
         self._pending_index_roots: List[str] = []
         self._pending_index_options: Dict[str, Any] = {}
+        self._pending_index_files_by_root: Dict[str, List[str]] = {}
 
         root = QHBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
@@ -1275,13 +1276,6 @@ class LibraryTab(QWidget):
             update_image,
             library_roots,
         )
-        if self._index_status_payload.get("scope_only") and files:
-            QMessageBox.information(
-                self,
-                "範圍提醒",
-                "後台 daemon 目前只支援整個目錄索引，將忽略選取的檔案範圍。",
-            )
-
         options = {
             "enable_text": update_text,
             "enable_thumb": update_image,
@@ -1289,15 +1283,37 @@ class LibraryTab(QWidget):
             "enable_img_vec": update_image,
             "enable_bm25": update_text,
         }
+        file_paths = [f.get("abs_path") for f in files if f.get("abs_path")]
         if len(library_roots) > 1 and hasattr(self.main_window, "show_toast"):
             self.main_window.show_toast(
                 f"偵測到多個目錄，將依序索引 {len(library_roots)} 個。",
                 level="info",
                 timeout_ms=8000,
             )
-        self._pending_index_roots = list(library_roots[1:])
+        roots_with_files: List[str] = []
+        files_by_root: Dict[str, List[str]] = {}
+        for root in library_roots:
+            root_path = Path(root)
+            scoped = []
+            for path in file_paths:
+                try:
+                    if root_path in Path(path).parents or Path(path) == root_path:
+                        scoped.append(path)
+                except Exception:
+                    continue
+            if scoped:
+                roots_with_files.append(root)
+                files_by_root[root] = scoped
+
+        if not roots_with_files:
+            QMessageBox.information(self, "沒有可索引檔案", "目前沒有符合條件的 PPTX 檔案可索引。")
+            self._reset_prepare_ui()
+            return
+
+        self._pending_index_roots = list(roots_with_files[1:])
         self._pending_index_options = dict(options)
-        self._start_index_job_for_root(library_roots[0], options)
+        self._pending_index_files_by_root = files_by_root
+        self._start_index_job_for_root(roots_with_files[0], options, files_by_root[roots_with_files[0]])
 
     def _on_index_progress(self, p: object) -> None:
         try:
@@ -1341,7 +1357,12 @@ class LibraryTab(QWidget):
         roots = [str(e.get("path", "")).strip() for e in entries if str(e.get("path", "")).strip()]
         return [r for r in roots if r]
 
-    def _start_index_job_for_root(self, library_root: str, options: Dict[str, Any]) -> None:
+    def _start_index_job_for_root(
+        self,
+        library_root: str,
+        options: Dict[str, Any],
+        file_paths: List[str],
+    ) -> None:
         if not self.ctx:
             return
         log.info(
@@ -1377,7 +1398,7 @@ class LibraryTab(QWidget):
             job_id = self.ctx.indexer.start_index_job(
                 library_root,
                 plan_mode="missing_or_changed",
-                options=options,
+                options={**options, "file_paths": file_paths},
             )
             if not job_id:
                 return {"job_id": None, "error": "啟動後台任務失敗，請確認 daemon 狀態。"}
@@ -1658,17 +1679,27 @@ class LibraryTab(QWidget):
         self.prog.setValue(100)
         self.prog_label.setText(message)
         if status == "completed" and self._pending_index_roots:
-            next_root = self._pending_index_roots.pop(0)
-            options = dict(self._pending_index_options)
-            if hasattr(self.main_window, "show_toast"):
-                self.main_window.show_toast(
-                    f"開始索引下一個目錄：{next_root}",
-                    level="info",
-                    timeout_ms=8000,
-                )
-            self._start_index_job_for_root(next_root, options)
+            next_root = None
+            while self._pending_index_roots:
+                candidate = self._pending_index_roots.pop(0)
+                if self._pending_index_files_by_root.get(candidate):
+                    next_root = candidate
+                    break
+            if next_root:
+                options = dict(self._pending_index_options)
+                if hasattr(self.main_window, "show_toast"):
+                    self.main_window.show_toast(
+                        f"開始索引下一個目錄：{next_root}",
+                        level="info",
+                        timeout_ms=8000,
+                    )
+                file_paths = self._pending_index_files_by_root.get(next_root, [])
+                self._start_index_job_for_root(next_root, options, file_paths)
         elif status in {"failed", "cancelled"}:
             self._pending_index_roots = []
+            self._pending_index_files_by_root = {}
+        elif status == "completed" and not self._pending_index_roots:
+            self._pending_index_files_by_root = {}
 
     def _on_error(self, tb: str) -> None:
         log.error("背景任務錯誤\n%s", tb)
