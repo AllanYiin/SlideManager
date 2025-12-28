@@ -295,6 +295,7 @@ class JobManager:
         pause: PauseToken,
     ) -> None:
         root_resolved = root.resolve()
+        root_key = os.path.normcase(str(root_resolved)) if is_windows() else str(root_resolved)
         allowed_paths: Optional[set[str]] = None
         if options.file_paths:
             allowed_paths = set()
@@ -302,7 +303,10 @@ class JobManager:
                 if not raw:
                     continue
                 try:
-                    allowed_paths.add(str(Path(raw).resolve()))
+                    resolved = str(Path(raw).resolve())
+                    allowed_paths.add(
+                        os.path.normcase(resolved) if is_windows() else resolved
+                    )
                 except Exception:
                     logger.warning("[INDEX_PLAN] skip_invalid_file_path path=%s", raw)
 
@@ -321,7 +325,13 @@ class JobManager:
                 resolved = path.resolve()
             except Exception:
                 return False
-            return resolved == root_resolved or root_resolved in resolved.parents
+            resolved_key = os.path.normcase(str(resolved)) if is_windows() else str(resolved)
+            root_prefix = root_key.rstrip("\\/")
+            if resolved_key == root_prefix:
+                return True
+            return resolved_key.startswith(root_prefix + os.sep) or resolved_key.startswith(
+                root_prefix + "/"
+            )
 
         scans: List[FileScan] = []
         if options.file_scans:
@@ -358,7 +368,8 @@ class JobManager:
                         record_skip("outside_root", raw_path)
                         continue
                     resolved_path = str(p.resolve())
-                    if allowed_paths is not None and resolved_path not in allowed_paths:
+                    resolved_key = os.path.normcase(resolved_path) if is_windows() else resolved_path
+                    if allowed_paths is not None and resolved_key not in allowed_paths:
                         logger.warning(
                             "[INDEX_PLAN] skip_unselected_path current=%d total=%d path=%s",
                             idx,
