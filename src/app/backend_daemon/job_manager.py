@@ -158,9 +158,14 @@ class JobManager:
             return
         pause: PauseToken = j["pause"]
         pause.pause()
+        now = now_epoch()
         self.conn.execute("UPDATE jobs SET status=? WHERE job_id=?", (JobStatus.PAUSED, job_id))
+        self.conn.execute(
+            "UPDATE tasks SET message=?, heartbeat_at=? WHERE job_id=? AND status=?",
+            ("paused", now, job_id, TaskStatus.RUNNING),
+        )
         self.conn.commit()
-        await self.bus.publish(job_id, "job_paused", {}, ts=now_epoch())
+        await self.bus.publish(job_id, "job_paused", {}, ts=now)
 
     async def resume_job(self, job_id: str) -> None:
         j = self._jobs.get(job_id)
@@ -168,9 +173,14 @@ class JobManager:
             return
         pause: PauseToken = j["pause"]
         pause.resume()
+        now = now_epoch()
         self.conn.execute("UPDATE jobs SET status=? WHERE job_id=?", (JobStatus.RUNNING, job_id))
+        self.conn.execute(
+            "UPDATE tasks SET message=?, heartbeat_at=? WHERE job_id=? AND status=?",
+            ("resumed", now, job_id, TaskStatus.RUNNING),
+        )
         self.conn.commit()
-        await self.bus.publish(job_id, "job_resumed", {}, ts=now_epoch())
+        await self.bus.publish(job_id, "job_resumed", {}, ts=now)
 
     async def cancel_job(self, job_id: str) -> None:
         j = self._jobs.get(job_id)
@@ -178,12 +188,17 @@ class JobManager:
             return
         cancel: CancelToken = j["cancel"]
         cancel.cancel()
+        now = now_epoch()
         self.conn.execute(
             "UPDATE jobs SET status=? WHERE job_id=?",
             (JobStatus.CANCEL_REQUESTED, job_id),
         )
+        self.conn.execute(
+            "UPDATE tasks SET message=?, heartbeat_at=? WHERE job_id=? AND status=?",
+            ("cancel_requested", now, job_id, TaskStatus.RUNNING),
+        )
         self.conn.commit()
-        await self.bus.publish(job_id, "job_cancel_requested", {}, ts=now_epoch())
+        await self.bus.publish(job_id, "job_cancel_requested", {}, ts=now)
 
     async def _run_job(
         self,
@@ -231,17 +246,21 @@ class JobManager:
 
         try:
             logger.info("[INDEX_JOB] step=text_extract_started job_id=%s", job_id)
-            await self._run_text_and_bm25(job_id, options, cancel, pause)
+            text_task_id = self._get_job_task_id(job_id, TaskKind.TEXT)
+            await self._run_text_and_bm25(job_id, options, cancel, pause, text_task_id)
 
             logger.info("[INDEX_JOB] step=text_extract_done job_id=%s", job_id)
             logger.info("[INDEX_JOB] step=text_embed_started job_id=%s", job_id)
-            await self._run_text_embeddings(job_id, options, cancel, pause)
+            text_vec_task_id = self._get_job_task_id(job_id, TaskKind.TEXT_VEC)
+            await self._run_text_embeddings(job_id, options, cancel, pause, text_vec_task_id)
             logger.info("[INDEX_JOB] step=text_embed_done job_id=%s", job_id)
             logger.info("[INDEX_JOB] step=thumb_render_started job_id=%s", job_id)
-            await self._run_pdf_and_thumbs(job_id, root, options, cancel, pause)
+            thumb_task_id = self._get_job_task_id(job_id, TaskKind.THUMB)
+            await self._run_pdf_and_thumbs(job_id, root, options, cancel, pause, thumb_task_id)
             logger.info("[INDEX_JOB] step=thumb_render_done job_id=%s", job_id)
             logger.info("[INDEX_JOB] step=image_embed_started job_id=%s", job_id)
-            await self._run_image_embeddings(job_id, root, options, cancel, pause)
+            img_vec_task_id = self._get_job_task_id(job_id, TaskKind.IMG_VEC)
+            await self._run_image_embeddings(job_id, root, options, cancel, pause, img_vec_task_id)
 
             await cancel.check()
         except asyncio.CancelledError:
@@ -395,6 +414,11 @@ class JobManager:
                     if n.startswith("ppt/slides/slide") and n.endswith(".xml")
                 )
 
+        needs_text_task = False
+        needs_text_vec_task = False
+        needs_thumb_task = False
+        needs_img_vec_task = False
+
         for fs in scans:
             await pause.wait_if_paused()
             await cancel.check()
@@ -455,7 +479,6 @@ class JobManager:
                         or int(prev["mtime_epoch"]) != fs.mtime_epoch
                     )
 
-                need_pdf = False
                 for page_id in page_ids:
                     status_map = self._artifact_status_map(page_id)
                     text_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.TEXT)), changed)
@@ -476,6 +499,7 @@ class JobManager:
                             ArtifactStatus.QUEUED,
                             options=params_for_text(options),
                         )
+                        needs_text_task = True
                     if options.enable_thumb and options.thumb.enabled and options.pdf.enabled:
                         if thumb_needed:
                             self._artifact_set(
@@ -485,7 +509,7 @@ class JobManager:
                                 ArtifactStatus.QUEUED,
                                 options=params_for_thumb(options, aspect),
                             )
-                            need_pdf = True
+                            needs_thumb_task = True
                     if options.enable_bm25 and bm25_needed:
                         self._artifact_mark(
                             page_id,
@@ -493,6 +517,7 @@ class JobManager:
                             ArtifactStatus.QUEUED,
                             options=params_for_bm25(options),
                         )
+                        needs_text_task = True
                     if options.enable_text_vec and options.embed.enabled_text and text_vec_needed:
                         self._artifact_set(
                             job_id,
@@ -501,6 +526,7 @@ class JobManager:
                             ArtifactStatus.QUEUED,
                             options=params_for_text_vec(options),
                         )
+                        needs_text_vec_task = True
                     if (
                         options.enable_img_vec
                         and options.embed.enabled_image
@@ -514,6 +540,7 @@ class JobManager:
                             ArtifactStatus.QUEUED,
                             options=params_for_img_vec(options),
                         )
+                        needs_img_vec_task = True
             except Exception as exc:
                 logger.exception("file planning failed: %s", exc)
                 self.conn.execute(
@@ -523,8 +550,14 @@ class JobManager:
                 self.conn.commit()
                 continue
 
-            if options.pdf.enabled and options.thumb.enabled and (changed or need_pdf):
-                self._enqueue_file_task_pdf(job_id, file_id, fs.path, priority=10)
+        if needs_text_task:
+            self._enqueue_job_task(job_id, TaskKind.TEXT)
+        if needs_text_vec_task:
+            self._enqueue_job_task(job_id, TaskKind.TEXT_VEC)
+        if needs_thumb_task:
+            self._enqueue_job_task(job_id, TaskKind.THUMB)
+        if needs_img_vec_task:
+            self._enqueue_job_task(job_id, TaskKind.IMG_VEC)
 
         self.conn.commit()
         task_rows = self.conn.execute(
@@ -649,10 +682,6 @@ class JobManager:
             "UPDATE artifacts SET status=?, updated_at=?, params_json=? WHERE page_id=? AND kind=?",
             (status, now, json.dumps(options, ensure_ascii=False), page_id, str(kind)),
         )
-        self.conn.execute(
-            "INSERT INTO tasks(job_id,page_id,kind,status,priority) VALUES (?,?,?,?,?)",
-            (job_id, page_id, str(kind), TaskStatus.QUEUED, 0),
-        )
 
     def _artifact_mark(
         self, page_id: int, kind: ArtifactKind, status: ArtifactStatus, options: dict
@@ -669,14 +698,50 @@ class JobManager:
             (job_id, file_id, TaskKind.PDF, TaskStatus.QUEUED, priority),
         )
 
+    def _enqueue_job_task(self, job_id: str, kind: TaskKind, priority: int = 0) -> None:
+        self.conn.execute(
+            "INSERT INTO tasks(job_id,kind,status,priority) VALUES (?,?,?,?)",
+            (job_id, str(kind), TaskStatus.QUEUED, priority),
+        )
+
+    def _get_job_task_id(self, job_id: str, kind: TaskKind) -> Optional[int]:
+        row = self.conn.execute(
+            "SELECT task_id FROM tasks WHERE job_id=? AND kind=? ORDER BY task_id ASC LIMIT 1",
+            (job_id, str(kind)),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["task_id"])
+
+    def _file_path_filter(self, file_paths: list[str]) -> tuple[str, list[object]]:
+        if not file_paths:
+            return "", []
+        placeholders = ",".join("?" for _ in file_paths)
+        return f"AND f.path IN ({placeholders})", list(file_paths)
+
     async def _run_text_and_bm25(
-        self, job_id: str, options: JobOptions, cancel: CancelToken, pause: PauseToken
+        self,
+        job_id: str,
+        options: JobOptions,
+        cancel: CancelToken,
+        pause: PauseToken,
+        task_id: Optional[int],
     ) -> None:
+        if not (options.enable_text or options.enable_bm25):
+            return
+        if task_id is None:
+            return
+
+        filter_sql, filter_params = self._file_path_filter(options.file_paths)
         rows = self.conn.execute(
-            "SELECT t.task_id, t.page_id, p.file_id, p.page_no, f.path "
-            "FROM tasks t JOIN pages p ON p.page_id=t.page_id JOIN files f ON f.file_id=p.file_id "
-            "WHERE t.job_id=? AND t.kind=? AND t.status=? ORDER BY f.file_id, p.page_no",
-            (job_id, ArtifactKind.TEXT, TaskStatus.QUEUED),
+            "SELECT p.page_id, p.page_no, p.file_id, f.path "
+            "FROM artifacts a "
+            "JOIN pages p ON p.page_id=a.page_id "
+            "JOIN files f ON f.file_id=p.file_id "
+            "WHERE a.kind=? AND a.status=? "
+            f"{filter_sql} "
+            "ORDER BY f.file_id, p.page_no",
+            (ArtifactKind.TEXT, ArtifactStatus.QUEUED, *filter_params),
         ).fetchall()
 
         logger.info(
@@ -685,18 +750,34 @@ class JobManager:
             len(rows),
             options.enable_bm25,
         )
+        if not rows:
+            self._task_start(task_id)
+            self._task_finish_skip(task_id, "no text tasks")
+            self.conn.commit()
+            return
 
         processed = 0
         last_commit_ts = time.monotonic()
+        self._task_start(task_id)
+        total = len(rows)
         for r in rows:
             await pause.wait_if_paused()
             await cancel.check()
-            task_id = int(r["task_id"])
             page_id = int(r["page_id"])
+            file_id = int(r["file_id"])
             pptx_path = str(r["path"])
             page_no = int(r["page_no"])
 
-            self._task_start(task_id)
+            now = now_epoch()
+            self.conn.execute(
+                "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
+                (ArtifactStatus.RUNNING, now, page_id, ArtifactKind.TEXT),
+            )
+            if options.enable_bm25:
+                self.conn.execute(
+                    "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=? AND status=?",
+                    (ArtifactStatus.RUNNING, now, page_id, ArtifactKind.BM25, ArtifactStatus.QUEUED),
+                )
             try:
                 raw, norm, sig = await asyncio.to_thread(
                     extract_page_text, pptx_path, page_no
@@ -717,9 +798,15 @@ class JobManager:
                         "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
                         (ArtifactStatus.READY, now, page_id, ArtifactKind.BM25),
                     )
-                self._task_finish_ok(task_id)
 
                 processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"text {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
                 if processed % options.commit_every_pages == 0 or (
                     time.monotonic() - last_commit_ts
                 ) >= options.commit_every_sec:
@@ -752,28 +839,78 @@ class JobManager:
                         ArtifactKind.TEXT,
                     ),
                 )
-                self._task_finish_err(task_id, "TEXT_EXTRACT_FAIL", str(exc))
+                if options.enable_bm25:
+                    self.conn.execute(
+                        "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=? WHERE page_id=? AND kind=?",
+                        (
+                            ArtifactStatus.ERROR,
+                            now,
+                            "TEXT_EXTRACT_FAIL",
+                            str(exc)[:500],
+                            page_id,
+                            ArtifactKind.BM25,
+                        ),
+                    )
+                processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"text {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
                 self.conn.commit()
                 continue
 
+        self._task_finish_ok(task_id)
+        self.conn.commit()
         self.conn.commit()
 
     async def _run_pdf_and_thumbs(
-        self, job_id: str, root: Path, options: JobOptions, cancel: CancelToken, pause: PauseToken
+        self,
+        job_id: str,
+        root: Path,
+        options: JobOptions,
+        cancel: CancelToken,
+        pause: PauseToken,
+        task_id: Optional[int],
     ) -> None:
         if not (options.enable_thumb and options.thumb.enabled and options.pdf.enabled):
             return
+        if task_id is None:
+            return
 
-        pdf_tasks = self.conn.execute(
-            "SELECT task_id, file_id FROM tasks WHERE job_id=? AND kind=? AND status=? ORDER BY priority DESC, task_id ASC",
-            (job_id, TaskKind.PDF, TaskStatus.QUEUED),
+        filter_sql, filter_params = self._file_path_filter(options.file_paths)
+        file_rows = self.conn.execute(
+            "SELECT DISTINCT f.file_id, f.path, f.slide_aspect "
+            "FROM files f "
+            "JOIN pages p ON p.file_id=f.file_id "
+            "JOIN artifacts a ON a.page_id=p.page_id "
+            "WHERE a.kind=? AND a.status=? "
+            f"{filter_sql} "
+            "ORDER BY f.file_id",
+            (ArtifactKind.THUMB, ArtifactStatus.QUEUED, *filter_params),
         ).fetchall()
+        total_pages = self.conn.execute(
+            "SELECT COUNT(*) AS cnt "
+            "FROM artifacts a "
+            "JOIN pages p ON p.page_id=a.page_id "
+            "JOIN files f ON f.file_id=p.file_id "
+            "WHERE a.kind=? AND a.status=? "
+            f"{filter_sql}",
+            (ArtifactKind.THUMB, ArtifactStatus.QUEUED, *filter_params),
+        ).fetchone()["cnt"]
 
         logger.info(
             "[INDEX_THUMB] job_id=%s pdf_tasks=%d",
             job_id,
-            len(pdf_tasks),
+            len(file_rows),
         )
+        if not file_rows:
+            self._task_start(task_id)
+            self._task_finish_skip(task_id, "no thumb tasks")
+            self.conn.commit()
+            return
 
         soffice = None
         if options.pdf.prefer in ("auto", "libreoffice"):
@@ -782,25 +919,16 @@ class JobManager:
         pdf_dir = root / ".slidemanager" / "pdf"
         pdf_dir.mkdir(parents=True, exist_ok=True)
 
-        for t in pdf_tasks:
+        self._task_start(task_id)
+        processed_pages = 0
+        for fr in file_rows:
             await pause.wait_if_paused()
             await cancel.check()
-
-            task_id = int(t["task_id"])
-            file_id = int(t["file_id"])
-            fr = self.conn.execute(
-                "SELECT path, slide_aspect, slide_count FROM files WHERE file_id=?",
-                (file_id,),
-            ).fetchone()
-            if fr is None:
-                self._task_finish_err(task_id, "FILE_MISSING", "file row missing")
-                continue
-
+            file_id = int(fr["file_id"])
             pptx_path = Path(str(fr["path"]))
             aspect = str(fr["slide_aspect"] or "unknown")
             out_pdf = pdf_dir / f"{file_id}.pdf"
 
-            self._task_start(task_id)
             try:
                 await asyncio.to_thread(
                     convert_pptx_to_pdf_libreoffice,
@@ -809,8 +937,6 @@ class JobManager:
                     soffice,
                     options.pdf.timeout_sec,
                 )
-                self._task_finish_ok(task_id)
-                self.conn.commit()
             except Exception as exc:
                 logger.exception("pdf convert failed: %s", exc)
                 now = now_epoch()
@@ -831,21 +957,31 @@ class JobManager:
                             ArtifactKind.THUMB,
                         ),
                     )
-                self._task_finish_err(task_id, "PDF_CONVERT_FAIL", str(exc))
+                processed_pages += len(page_rows)
+                if total_pages:
+                    self._task_progress(
+                        task_id,
+                        progress=processed_pages / total_pages,
+                        message=f"thumb {processed_pages}/{total_pages}",
+                        page_id=page_rows[-1]["page_id"] if page_rows else None,
+                        file_id=file_id,
+                    )
                 self.conn.commit()
                 continue
 
             thumb_tasks = self.conn.execute(
-                "SELECT t.task_id, t.page_id, p.page_no, p.aspect FROM tasks t JOIN pages p ON p.page_id=t.page_id "
-                "WHERE t.job_id=? AND t.kind=? AND t.status=? AND p.file_id=? ORDER BY p.page_no",
-                (job_id, ArtifactKind.THUMB, TaskStatus.QUEUED, file_id),
+                "SELECT p.page_id, p.page_no, p.aspect "
+                "FROM pages p "
+                "JOIN artifacts a ON a.page_id=p.page_id "
+                "WHERE a.kind=? AND a.status=? AND p.file_id=? "
+                "ORDER BY p.page_no",
+                (ArtifactKind.THUMB, ArtifactStatus.QUEUED, file_id),
             ).fetchall()
 
             thumb_root = root / ".slidemanager" / "thumbs" / str(file_id)
             for tr in thumb_tasks:
                 await pause.wait_if_paused()
                 await cancel.check()
-                tt_id = int(tr["task_id"])
                 page_id = int(tr["page_id"])
                 page_no = int(tr["page_no"])
                 p_aspect = str(tr["aspect"] or aspect)
@@ -858,7 +994,11 @@ class JobManager:
                 )
                 out_img = thumb_root / f"{page_no}_{p_aspect}_{w}x{h}.jpg"
 
-                self._task_start(tt_id)
+                now2 = now_epoch()
+                self.conn.execute(
+                    "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
+                    (ArtifactStatus.RUNNING, now2, page_id, ArtifactKind.THUMB),
+                )
                 try:
                     await asyncio.to_thread(
                         render_pdf_page_to_thumb,
@@ -877,7 +1017,6 @@ class JobManager:
                         "UPDATE artifacts SET status=?, updated_at=?, attempts=attempts+1 WHERE page_id=? AND kind=?",
                         (ArtifactStatus.READY, now2, page_id, ArtifactKind.THUMB),
                     )
-                    self._task_finish_ok(tt_id)
                     self.conn.commit()
 
                     await self.bus.publish(
@@ -892,6 +1031,15 @@ class JobManager:
                         },
                         ts=now_epoch(),
                     )
+                    processed_pages += 1
+                    if total_pages:
+                        self._task_progress(
+                            task_id,
+                            progress=processed_pages / total_pages,
+                            message=f"thumb {processed_pages}/{total_pages}",
+                            page_id=page_id,
+                            file_id=file_id,
+                        )
                 except Exception as exc:
                     logger.exception("thumb render failed: %s", exc)
                     now2 = now_epoch()
@@ -906,27 +1054,45 @@ class JobManager:
                             ArtifactKind.THUMB,
                         ),
                     )
-                    self._task_finish_err(tt_id, "THUMB_FAIL", str(exc))
+                    processed_pages += 1
+                    if total_pages:
+                        self._task_progress(
+                            task_id,
+                            progress=processed_pages / total_pages,
+                            message=f"thumb {processed_pages}/{total_pages}",
+                            page_id=page_id,
+                            file_id=file_id,
+                        )
                     self.conn.commit()
                     continue
+        self._task_finish_ok(task_id)
 
     async def _run_text_embeddings(
-        self, job_id: str, options: JobOptions, cancel: CancelToken, pause: PauseToken
+        self,
+        job_id: str,
+        options: JobOptions,
+        cancel: CancelToken,
+        pause: PauseToken,
+        task_id: Optional[int],
     ) -> None:
         if not (options.enable_text_vec and options.embed.enabled_text):
+            return
+        if task_id is None:
             return
 
         limiter = DualTokenBucket(options.embed.req_per_min, options.embed.tok_per_min)
 
+        filter_sql, filter_params = self._file_path_filter(options.file_paths)
         rows = self.conn.execute(
-            "SELECT t.task_id, t.page_id, p.page_no, f.path, pt.norm_text, pt.text_sig "
-            "FROM tasks t "
-            "JOIN pages p ON p.page_id=t.page_id "
+            "SELECT p.page_id, p.page_no, p.file_id, f.path, pt.norm_text, pt.text_sig "
+            "FROM artifacts a "
+            "JOIN pages p ON p.page_id=a.page_id "
             "JOIN files f ON f.file_id=p.file_id "
             "LEFT JOIN page_text pt ON pt.page_id=p.page_id "
-            "WHERE t.job_id=? AND t.kind=? AND t.status=? "
-            "ORDER BY t.task_id ASC",
-            (job_id, ArtifactKind.TEXT_VEC, TaskStatus.QUEUED),
+            "WHERE a.kind=? AND a.status=? "
+            f"{filter_sql} "
+            "ORDER BY p.page_id ASC",
+            (ArtifactKind.TEXT_VEC, ArtifactStatus.QUEUED, *filter_params),
         ).fetchall()
 
         logger.info(
@@ -936,13 +1102,21 @@ class JobManager:
             options.embed.model_text,
             options.embed.batch_size,
         )
+        if not rows:
+            self._task_start(task_id)
+            self._task_finish_skip(task_id, "no text_vec tasks")
+            self.conn.commit()
+            return
 
-        needs: List[Tuple[int, int, str, str, str]] = []
+        needs: List[Tuple[int, int, int, str, str, str]] = []
         empty_text = 0
         cache_hit = 0
+        processed = 0
+        total = len(rows)
+        self._task_start(task_id)
         for r in rows:
-            task_id = int(r["task_id"])
             page_id = int(r["page_id"])
+            file_id = int(r["file_id"])
             pptx_path = str(r["path"])
             page_no = int(r["page_no"])
             norm = str(r["norm_text"] or "")
@@ -951,7 +1125,11 @@ class JobManager:
             await pause.wait_if_paused()
             await cancel.check()
 
-            self._task_start(task_id)
+            now = now_epoch()
+            self.conn.execute(
+                "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
+                (ArtifactStatus.RUNNING, now, page_id, ArtifactKind.TEXT_VEC),
+            )
 
             if not norm.strip():
                 dim = 3072
@@ -970,9 +1148,16 @@ class JobManager:
                     "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
                     (ArtifactStatus.READY, now, page_id, ArtifactKind.TEXT_VEC),
                 )
-                self._task_finish_ok(task_id)
                 self.conn.commit()
                 empty_text += 1
+                processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"text_vec {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
                 continue
 
             if sig:
@@ -990,12 +1175,19 @@ class JobManager:
                         "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
                         (ArtifactStatus.READY, now, page_id, ArtifactKind.TEXT_VEC),
                     )
-                    self._task_finish_ok(task_id)
                     self.conn.commit()
                     cache_hit += 1
+                    processed += 1
+                    self._task_progress(
+                        task_id,
+                        progress=processed / total,
+                        message=f"text_vec {processed}/{total}",
+                        page_id=page_id,
+                        file_id=file_id,
+                    )
                     continue
 
-            needs.append((task_id, page_id, pptx_path, norm, sig))
+            needs.append((task_id, page_id, file_id, pptx_path, norm, sig))
 
         logger.info(
             "[INDEX_TEXT_VEC] job_id=%s needs=%d empty_text=%d cache_hit=%d",
@@ -1011,7 +1203,7 @@ class JobManager:
             await cancel.check()
 
             batch = needs[i : i + options.embed.batch_size]
-            texts = [b[3] for b in batch]
+            texts = [b[4] for b in batch]
             try:
                 vecs = await embed_text_batch_openai(
                     texts,
@@ -1022,7 +1214,7 @@ class JobManager:
             except Exception as exc:
                 logger.exception("embedding failed: %s", exc)
                 now = now_epoch()
-                for (task_id, page_id, _pptx, _norm, _sig) in batch:
+                for (task_id, page_id, file_id, _pptx, _norm, _sig) in batch:
                     self.conn.execute(
                         "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=? WHERE page_id=? AND kind=?",
                         (
@@ -1034,13 +1226,20 @@ class JobManager:
                             ArtifactKind.TEXT_VEC,
                         ),
                     )
-                    self._task_finish_err(task_id, "EMBED_FAIL", str(exc))
+                    processed += 1
+                    self._task_progress(
+                        task_id,
+                        progress=processed / total,
+                        message=f"text_vec {processed}/{total}",
+                        page_id=page_id,
+                        file_id=file_id,
+                    )
                 self.conn.commit()
                 i += len(batch)
                 continue
 
             now = now_epoch()
-            for (task_id, page_id, _pptx, _norm, sig), vec in zip(batch, vecs):
+            for (task_id, page_id, file_id, _pptx, _norm, sig), vec in zip(batch, vecs):
                 dim = len(vec)
                 vb = pack_f32(vec)
                 if sig:
@@ -1067,27 +1266,49 @@ class JobManager:
                     "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
                     (ArtifactStatus.READY, now, page_id, ArtifactKind.TEXT_VEC),
                 )
-                self._task_finish_ok(task_id)
+                processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"text_vec {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
 
             self.conn.commit()
             i += len(batch)
+        self._task_finish_ok(task_id)
+        self.conn.commit()
 
     async def _run_image_embeddings(
-        self, job_id: str, root: Path, options: JobOptions, cancel: CancelToken, pause: PauseToken
+        self,
+        job_id: str,
+        root: Path,
+        options: JobOptions,
+        cancel: CancelToken,
+        pause: PauseToken,
+        task_id: Optional[int],
     ) -> None:
         if not (options.enable_img_vec and options.embed.enabled_image):
             return
+        if task_id is None:
+            return
 
+        filter_sql, filter_params = self._file_path_filter(options.file_paths)
         rows = self.conn.execute(
-            "SELECT t.task_id, t.page_id, p.page_no, f.path "
-            "FROM tasks t "
-            "JOIN pages p ON p.page_id=t.page_id "
+            "SELECT p.page_id, p.page_no, p.file_id, f.path "
+            "FROM artifacts a "
+            "JOIN pages p ON p.page_id=a.page_id "
             "JOIN files f ON f.file_id=p.file_id "
-            "WHERE t.job_id=? AND t.kind=? AND t.status=? "
-            "ORDER BY t.task_id ASC",
-            (job_id, ArtifactKind.IMG_VEC, TaskStatus.QUEUED),
+            "WHERE a.kind=? AND a.status=? "
+            f"{filter_sql} "
+            "ORDER BY p.page_id ASC",
+            (ArtifactKind.IMG_VEC, ArtifactStatus.QUEUED, *filter_params),
         ).fetchall()
         if not rows:
+            self._task_start(task_id)
+            self._task_finish_skip(task_id, "no img_vec tasks")
+            self.conn.commit()
             return
 
         embedder = self._get_image_embedder(root)
@@ -1101,10 +1322,9 @@ class JobManager:
 
 
             now = now_epoch()
+            self._task_start(task_id)
             for r in rows:
-                task_id = int(r["task_id"])
                 page_id = int(r["page_id"])
-                self._task_start(task_id)
                 self.conn.execute(
                     "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=?, attempts=attempts+1 "
                     "WHERE page_id=? AND kind=?",
@@ -1117,7 +1337,7 @@ class JobManager:
                         ArtifactKind.IMG_VEC,
                     ),
                 )
-                self._task_finish_skip(task_id, "missing onnx model")
+            self._task_finish_skip(task_id, "missing onnx model")
             self.conn.commit()
             return
 
@@ -1145,16 +1365,22 @@ class JobManager:
         failed = 0
 
         last_commit_ts = time.monotonic()
+        total = len(rows)
+        self._task_start(task_id)
         for r in rows:
             await pause.wait_if_paused()
             await cancel.check()
 
-            task_id = int(r["task_id"])
             page_id = int(r["page_id"])
+            file_id = int(r["file_id"])
             pptx_path = str(r["path"])
             page_no = int(r["page_no"])
 
-            self._task_start(task_id)
+            now = now_epoch()
+            self.conn.execute(
+                "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
+                (ArtifactStatus.RUNNING, now, page_id, ArtifactKind.IMG_VEC),
+            )
             thumb_row = self.conn.execute(
                 "SELECT image_path FROM thumbnails WHERE page_id=? ORDER BY updated_at DESC LIMIT 1",
                 (page_id,),
@@ -1173,10 +1399,17 @@ class JobManager:
                         ArtifactKind.IMG_VEC,
                     ),
                 )
-                self._task_finish_skip(task_id, "thumb missing")
                 self.conn.commit()
 
                 skipped += 1
+                processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"img_vec {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
 
                 continue
 
@@ -1202,9 +1435,15 @@ class JobManager:
                     "UPDATE artifacts SET status=?, updated_at=?, attempts=attempts+1 WHERE page_id=? AND kind=?",
                     (ArtifactStatus.READY, now, page_id, ArtifactKind.IMG_VEC),
                 )
-                self._task_finish_ok(task_id)
 
                 processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"img_vec {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
                 if processed % options.commit_every_pages == 0 or (
                     time.monotonic() - last_commit_ts
                 ) >= options.commit_every_sec:
@@ -1238,12 +1477,20 @@ class JobManager:
                         ArtifactKind.IMG_VEC,
                     ),
                 )
-                self._task_finish_err(task_id, "IMG_VEC_FAIL", str(exc))
                 self.conn.commit()
 
                 failed += 1
+                processed += 1
+                self._task_progress(
+                    task_id,
+                    progress=processed / total,
+                    message=f"img_vec {processed}/{total}",
+                    page_id=page_id,
+                    file_id=file_id,
+                )
                 continue
 
+        self._task_finish_ok(task_id)
         self.conn.commit()
         logger.info(
             "[INDEX_IMG_VEC] job_id=%s done processed=%d skipped=%d failed=%d",
@@ -1362,6 +1609,21 @@ class JobManager:
             (TaskStatus.RUNNING, now, now, "start", task_id),
         )
         self.conn.commit()
+
+    def _task_progress(
+        self,
+        task_id: int,
+        *,
+        progress: float,
+        message: str,
+        page_id: Optional[int] = None,
+        file_id: Optional[int] = None,
+    ) -> None:
+        now = now_epoch()
+        self.conn.execute(
+            "UPDATE tasks SET heartbeat_at=?, progress=?, message=?, page_id=?, file_id=? WHERE task_id=?",
+            (now, progress, message, page_id, file_id, task_id),
+        )
 
     def _task_finish_ok(self, task_id: int) -> None:
         now = now_epoch()
