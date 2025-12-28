@@ -818,6 +818,8 @@ class LibraryTab(QWidget):
         self._cancel_prepare = False
 
         def task():
+            import time
+
             if self._cancel_prepare:
                 return {"cancelled": True}
             cat = self.ctx.store.load_manifest()
@@ -869,6 +871,18 @@ class LibraryTab(QWidget):
                 if entry.get("metadata_mtime") != mtime or entry.get("metadata_size") != size:
                     inconsistent.append(path)
             if inconsistent:
+                scanned_at = cat.get("scanned_at")
+                try:
+                    scanned_at_int = int(scanned_at) if scanned_at is not None else 0
+                except (TypeError, ValueError):
+                    scanned_at_int = 0
+                if scanned_at_int > 0 and int(time.time()) - scanned_at_int < 3600:
+                    log.info(
+                        "[INDEX_SCOPE][UI] metadata_inconsistent_recent_scan count=%d age_sec=%d",
+                        len(inconsistent),
+                        int(time.time()) - scanned_at_int,
+                    )
+                    return {"skip_rescan": True, "files": selected, "inconsistent": inconsistent}
                 log.warning(
                     "[INDEX_SCOPE][UI] metadata_inconsistent count=%d paths=%s",
                     len(inconsistent),
@@ -887,6 +901,15 @@ class LibraryTab(QWidget):
             self.prog_label.setText("已取消")
             self._reset_prepare_ui()
             return
+        if isinstance(files, dict) and files.get("skip_rescan"):
+            skipped = files.get("inconsistent") or []
+            if skipped and hasattr(self.main_window, "show_toast"):
+                self.main_window.show_toast(
+                    "一小時內已掃描過，略過重新掃描，直接使用現有清單進行索引。",
+                    level="info",
+                    timeout_ms=8000,
+                )
+            files = files.get("files") or []
         if isinstance(files, dict) and files.get("inconsistent"):
             self._reset_prepare_ui()
             QMessageBox.information(
