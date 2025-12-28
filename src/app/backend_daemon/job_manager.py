@@ -203,6 +203,11 @@ class JobManager:
         await self.bus.publish(job_id, "job_planning_started", {}, ts=now_epoch())
 
         try:
+            logger.info(
+                "[INDEX_JOB] step=plan_started job_id=%s root=%s",
+                job_id,
+                root,
+            )
             await self._plan_jobs(job_id, root, options, cancel, pause)
         except Exception as exc:
             logger.exception("planning failed: %s", exc)
@@ -225,10 +230,19 @@ class JobManager:
         await self.bus.publish(job_id, "job_started", {}, ts=now_epoch())
 
         try:
+            logger.info("[INDEX_JOB] step=text_extract_started job_id=%s", job_id)
             await self._run_text_and_bm25(job_id, options, cancel, pause)
+
+            logger.info("[INDEX_JOB] step=text_extract_done job_id=%s", job_id)
+            logger.info("[INDEX_JOB] step=text_embed_started job_id=%s", job_id)
             await self._run_text_embeddings(job_id, options, cancel, pause)
+            logger.info("[INDEX_JOB] step=text_embed_done job_id=%s", job_id)
+            logger.info("[INDEX_JOB] step=thumb_render_started job_id=%s", job_id)
             await self._run_pdf_and_thumbs(job_id, root, options, cancel, pause)
+            logger.info("[INDEX_JOB] step=thumb_render_done job_id=%s", job_id)
+            logger.info("[INDEX_JOB] step=image_embed_started job_id=%s", job_id)
             await self._run_image_embeddings(job_id, root, options, cancel, pause)
+
             await cancel.check()
         except asyncio.CancelledError:
             self._finalize_cancel(job_id)
@@ -519,6 +533,13 @@ class JobManager:
         ).fetchall()
         task_counts = {str(r["kind"]): int(r["cnt"]) for r in task_rows}
         total_tasks = sum(task_counts.values())
+        logger.info(
+            "[INDEX_PLAN] job_id=%s files=%d task_total=%d task_counts=%s",
+            job_id,
+            len(scans),
+            total_tasks,
+            task_counts,
+        )
         if total_tasks == 0:
             logger.warning(
                 "[INDEX_PLAN] no_tasks_created job_id=%s files=%d options=%s",
@@ -658,6 +679,13 @@ class JobManager:
             (job_id, ArtifactKind.TEXT, TaskStatus.QUEUED),
         ).fetchall()
 
+        logger.info(
+            "[INDEX_TEXT] job_id=%s queued=%d enable_bm25=%s",
+            job_id,
+            len(rows),
+            options.enable_bm25,
+        )
+
         processed = 0
         last_commit_ts = time.monotonic()
         for r in rows:
@@ -740,6 +768,12 @@ class JobManager:
             "SELECT task_id, file_id FROM tasks WHERE job_id=? AND kind=? AND status=? ORDER BY priority DESC, task_id ASC",
             (job_id, TaskKind.PDF, TaskStatus.QUEUED),
         ).fetchall()
+
+        logger.info(
+            "[INDEX_THUMB] job_id=%s pdf_tasks=%d",
+            job_id,
+            len(pdf_tasks),
+        )
 
         soffice = None
         if options.pdf.prefer in ("auto", "libreoffice"):
@@ -895,7 +929,17 @@ class JobManager:
             (job_id, ArtifactKind.TEXT_VEC, TaskStatus.QUEUED),
         ).fetchall()
 
+        logger.info(
+            "[INDEX_TEXT_VEC] job_id=%s queued=%d model=%s batch=%d",
+            job_id,
+            len(rows),
+            options.embed.model_text,
+            options.embed.batch_size,
+        )
+
         needs: List[Tuple[int, int, str, str, str]] = []
+        empty_text = 0
+        cache_hit = 0
         for r in rows:
             task_id = int(r["task_id"])
             page_id = int(r["page_id"])
@@ -928,6 +972,7 @@ class JobManager:
                 )
                 self._task_finish_ok(task_id)
                 self.conn.commit()
+                empty_text += 1
                 continue
 
             if sig:
@@ -947,9 +992,18 @@ class JobManager:
                     )
                     self._task_finish_ok(task_id)
                     self.conn.commit()
+                    cache_hit += 1
                     continue
 
             needs.append((task_id, page_id, pptx_path, norm, sig))
+
+        logger.info(
+            "[INDEX_TEXT_VEC] job_id=%s needs=%d empty_text=%d cache_hit=%d",
+            job_id,
+            len(needs),
+            empty_text,
+            cache_hit,
+        )
 
         i = 0
         while i < len(needs):
@@ -1038,7 +1092,14 @@ class JobManager:
 
         embedder = self._get_image_embedder(root)
         if embedder is None:
-            logger.warning("img_vec skipped: missing onnx model in cache/")
+
+            logger.warning(
+                "[INDEX_IMG_VEC] job_id=%s skipped=%d reason=missing_onnx_model",
+                job_id,
+                len(rows),
+            )
+
+
             now = now_epoch()
             for r in rows:
                 task_id = int(r["task_id"])
@@ -1068,7 +1129,21 @@ class JobManager:
         height = int(info["height"])
         channels_first = bool(info["channels_first"])
 
+
+        logger.info(
+            "[INDEX_IMG_VEC] job_id=%s queued=%d model=%s size=%dx%d channels_first=%s",
+            job_id,
+            len(rows),
+            model_id,
+            width,
+            height,
+            channels_first,
+        )
+
         processed = 0
+        skipped = 0
+        failed = 0
+
         last_commit_ts = time.monotonic()
         for r in rows:
             await pause.wait_if_paused()
@@ -1100,6 +1175,9 @@ class JobManager:
                 )
                 self._task_finish_skip(task_id, "thumb missing")
                 self.conn.commit()
+
+                skipped += 1
+
                 continue
 
             thumb_path = str(thumb_row["image_path"])
@@ -1162,9 +1240,19 @@ class JobManager:
                 )
                 self._task_finish_err(task_id, "IMG_VEC_FAIL", str(exc))
                 self.conn.commit()
+
+                failed += 1
                 continue
 
         self.conn.commit()
+        logger.info(
+            "[INDEX_IMG_VEC] job_id=%s done processed=%d skipped=%d failed=%d",
+            job_id,
+            processed,
+            skipped,
+            failed,
+        )
+
 
     def _get_image_embedder(self, root: Path) -> tuple[object, dict[str, object]] | None:
         model_path = root / "cache" / "image_embedder.onnx"
