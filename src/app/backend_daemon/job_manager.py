@@ -679,11 +679,7 @@ class JobManager:
         return {str(r["kind"]): str(r["status"]) for r in rows}
 
     def _artifact_needs_refresh(self, status: str | None, changed: bool) -> bool:
-        if changed:
-            return True
-        if status is None:
-            return True
-        return status not in {ArtifactStatus.READY, ArtifactStatus.SKIPPED}
+        return True
 
     def _artifact_set(
         self, job_id: str, page_id: int, kind: ArtifactKind, status: ArtifactStatus, options: dict

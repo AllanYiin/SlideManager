@@ -770,23 +770,31 @@ class LibraryTab(QWidget):
     def _prepare_index_needed(self) -> None:
         if not self.ctx:
             return
-        self._set_prepare_ui("正在整理索引需求（使用上次掃描結果）...")
+        self._set_prepare_ui("正在掃描並整理索引需求...")
         self._prepare_scan_count = 0
         self._prepare_in_progress = True
         self._cancel_prepare = False
 
-        def task():
+        def task(_progress_emit):
             if self._cancel_prepare:
                 return {"cancelled": True}
-            manifest = self.ctx.store.load_manifest()
+            log.info("[INDEX_FLOW][PREPARE] step=scan_before_index_needed")
+            cat = self.ctx.catalog.scan(
+                force=False,
+                on_progress=_progress_emit,
+                progress_every=10,
+                cancel_flag=lambda: self._cancel_prepare,
+            )
+            if isinstance(cat, dict) and cat.get("cancelled"):
+                return {"cancelled": True}
+            manifest = cat if isinstance(cat, dict) else self.ctx.store.load_manifest()
             files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
-            if not files and not manifest.get("scanned_at"):
-                log.info("[INDEX_FLOW][PREPARE] step=manifest_missing_scan")
-                return {"needs_scan": True}
-            log.info("[INDEX_FLOW][PREPARE] step=compute_needed_files_start source=indexer.compute_needed_files")
-            return self.ctx.indexer.compute_needed_files()
+            log.info("[INDEX_FLOW][PREPARE] step=collect_all_files total=%d", len(files))
+            return files
 
         w = Worker(task)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_prepare_scan_progress)
         w.signals.finished.connect(self._on_prepare_index_needed_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
@@ -796,11 +804,6 @@ class LibraryTab(QWidget):
             log.info("[INDEX_FLOW][PREPARE] step=prepare_cancelled")
             self.prog_label.setText("已取消")
             self._reset_prepare_ui()
-            return
-        if isinstance(files, dict) and files.get("needs_scan"):
-            log.info("[INDEX_FLOW][PREPARE] step=needs_scan")
-            self._reset_prepare_ui()
-            QMessageBox.information(self, "尚未掃描", "目前尚未掃描檔案，請先按下『掃描檔案』更新清單")
             return
         if not files:
             log.info("[INDEX_FLOW][PREPARE] step=no_files_needed")
@@ -813,17 +816,26 @@ class LibraryTab(QWidget):
     def _prepare_index_selected(self, selected_paths: List[str]) -> None:
         if not self.ctx:
             return
-        self._set_prepare_ui("正在整理選取檔案...")
+        self._set_prepare_ui("正在掃描並整理選取檔案...")
         self._prepare_in_progress = True
         self._cancel_prepare = False
 
-        def task():
+        def task(_progress_emit):
             import time
 
             if self._cancel_prepare:
                 return {"cancelled": True}
-            cat = self.ctx.store.load_manifest()
-            files = [e for e in cat.get("files", []) if isinstance(e, dict)]
+            log.info("[INDEX_FLOW][PREPARE] step=scan_before_index_selected")
+            cat = self.ctx.catalog.scan(
+                force=False,
+                on_progress=_progress_emit,
+                progress_every=10,
+                cancel_flag=lambda: self._cancel_prepare,
+            )
+            if isinstance(cat, dict) and cat.get("cancelled"):
+                return {"cancelled": True}
+            manifest = cat if isinstance(cat, dict) else self.ctx.store.load_manifest()
+            files = [e for e in manifest.get("files", []) if isinstance(e, dict)]
             selected_set = {p for p in selected_paths if p}
             log.info(
                 "[INDEX_SCOPE][UI] filter=selected_paths before=%d after=%d conditions=abs_path in selected_set",
@@ -871,7 +883,7 @@ class LibraryTab(QWidget):
                 if entry.get("metadata_mtime") != mtime or entry.get("metadata_size") != size:
                     inconsistent.append(path)
             if inconsistent:
-                scanned_at = cat.get("scanned_at")
+                scanned_at = manifest.get("scanned_at") if isinstance(manifest, dict) else None
                 try:
                     scanned_at_int = int(scanned_at) if scanned_at is not None else 0
                 except (TypeError, ValueError):
@@ -892,6 +904,8 @@ class LibraryTab(QWidget):
             return selected
 
         w = Worker(task)
+        w.args = (w.signals.progress.emit,)
+        w.signals.progress.connect(self._on_prepare_scan_progress)
         w.signals.finished.connect(self._on_prepare_index_selected_done)
         w.signals.error.connect(self._on_error)
         self.main_window.thread_pool.start(w)
