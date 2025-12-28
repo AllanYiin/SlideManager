@@ -71,13 +71,34 @@ async def get_job(request: Request, job_id: str):
     except Exception:
         options = {}
 
-    stats_rows = mgr.conn.execute(
-        "SELECT a.kind, a.status, COUNT(*) AS cnt "
-        "FROM artifacts a "
-        "WHERE a.page_id IN (SELECT DISTINCT page_id FROM tasks WHERE job_id=? AND page_id IS NOT NULL) "
-        "GROUP BY a.kind, a.status",
-        (job_id,),
-    ).fetchall()
+    file_paths = []
+    if isinstance(options.get("file_paths"), list):
+        file_paths = [str(p) for p in options.get("file_paths") if p]
+
+    if file_paths:
+        placeholders = ",".join("?" for _ in file_paths)
+        stats_sql = (
+            "SELECT a.kind, a.status, COUNT(*) AS cnt "
+            "FROM artifacts a "
+            "JOIN pages p ON p.page_id=a.page_id "
+            "JOIN files f ON f.file_id=p.file_id "
+            f"WHERE f.path IN ({placeholders}) "
+            "GROUP BY a.kind, a.status"
+        )
+        stats_params: list[object] = list(file_paths)
+    else:
+        filter_sql, params = _build_path_filter(row["library_root"])
+        stats_sql = (
+            "SELECT a.kind, a.status, COUNT(*) AS cnt "
+            "FROM artifacts a "
+            "JOIN pages p ON p.page_id=a.page_id "
+            "JOIN files f ON f.file_id=p.file_id "
+            f"{filter_sql} "
+            "GROUP BY a.kind, a.status"
+        )
+        stats_params = params
+
+    stats_rows = mgr.conn.execute(stats_sql, stats_params).fetchall()
     stats: dict[str, dict[str, int]] = {}
     for r in stats_rows:
         kind = str(r["kind"])
