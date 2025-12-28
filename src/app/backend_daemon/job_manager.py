@@ -232,6 +232,7 @@ class JobManager:
         try:
             logger.info("[INDEX_JOB] step=text_extract_started job_id=%s", job_id)
             await self._run_text_and_bm25(job_id, options, cancel, pause)
+
             logger.info("[INDEX_JOB] step=text_extract_done job_id=%s", job_id)
             logger.info("[INDEX_JOB] step=text_embed_started job_id=%s", job_id)
             await self._run_text_embeddings(job_id, options, cancel, pause)
@@ -241,7 +242,7 @@ class JobManager:
             logger.info("[INDEX_JOB] step=thumb_render_done job_id=%s", job_id)
             logger.info("[INDEX_JOB] step=image_embed_started job_id=%s", job_id)
             await self._run_image_embeddings(job_id, root, options, cancel, pause)
-            logger.info("[INDEX_JOB] step=image_embed_done job_id=%s", job_id)
+
             await cancel.check()
         except asyncio.CancelledError:
             self._finalize_cancel(job_id)
@@ -1091,11 +1092,14 @@ class JobManager:
 
         embedder = self._get_image_embedder(root)
         if embedder is None:
+
             logger.warning(
                 "[INDEX_IMG_VEC] job_id=%s skipped=%d reason=missing_onnx_model",
                 job_id,
                 len(rows),
             )
+
+
             now = now_epoch()
             for r in rows:
                 task_id = int(r["task_id"])
@@ -1125,6 +1129,7 @@ class JobManager:
         height = int(info["height"])
         channels_first = bool(info["channels_first"])
 
+
         logger.info(
             "[INDEX_IMG_VEC] job_id=%s queued=%d model=%s size=%dx%d channels_first=%s",
             job_id,
@@ -1138,6 +1143,7 @@ class JobManager:
         processed = 0
         skipped = 0
         failed = 0
+
         last_commit_ts = time.monotonic()
         for r in rows:
             await pause.wait_if_paused()
@@ -1169,7 +1175,9 @@ class JobManager:
                 )
                 self._task_finish_skip(task_id, "thumb missing")
                 self.conn.commit()
+
                 skipped += 1
+
                 continue
 
             thumb_path = str(thumb_row["image_path"])
@@ -1232,6 +1240,7 @@ class JobManager:
                 )
                 self._task_finish_err(task_id, "IMG_VEC_FAIL", str(exc))
                 self.conn.commit()
+
                 failed += 1
                 continue
 
@@ -1243,6 +1252,7 @@ class JobManager:
             skipped,
             failed,
         )
+
 
     def _get_image_embedder(self, root: Path) -> tuple[object, dict[str, object]] | None:
         model_path = root / "cache" / "image_embedder.onnx"
