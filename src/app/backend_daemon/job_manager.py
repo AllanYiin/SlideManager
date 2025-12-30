@@ -494,6 +494,20 @@ class JobManager:
                     status_map = self._artifact_status_map(page_id)
                     text_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.TEXT)), changed)
                     thumb_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.THUMB)), changed)
+                    thumb_missing = False
+                    if (
+                        not thumb_needed
+                        and options.enable_thumb
+                        and options.thumb.enabled
+                        and options.pdf.enabled
+                    ):
+                        thumb_missing = self._thumb_file_missing(page_id)
+                        if thumb_missing:
+                            logger.info(
+                                "[INDEX_PLAN] thumb_missing page_id=%s path=%s",
+                                page_id,
+                                fs.path,
+                            )
                     bm25_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.BM25)), changed)
                     text_vec_needed = self._artifact_needs_refresh(
                         status_map.get(str(ArtifactKind.TEXT_VEC)), changed
@@ -512,7 +526,7 @@ class JobManager:
                         )
                         needs_text_task = True
                     if options.enable_thumb and options.thumb.enabled and options.pdf.enabled:
-                        if thumb_needed:
+                        if thumb_needed or thumb_missing:
                             self._artifact_set(
                                 job_id,
                                 page_id,
@@ -680,6 +694,22 @@ class JobManager:
 
     def _artifact_needs_refresh(self, status: str | None, changed: bool) -> bool:
         return True
+
+    def _thumb_file_missing(self, page_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT image_path FROM thumbnails WHERE page_id=? ORDER BY updated_at DESC LIMIT 1",
+            (page_id,),
+        ).fetchone()
+        if row is None:
+            return True
+        image_path = str(row["image_path"] or "").strip()
+        if not image_path:
+            return True
+        try:
+            return not Path(image_path).exists()
+        except Exception:
+            logger.warning("[INDEX_PLAN] thumb_path_invalid page_id=%s path=%s", page_id, image_path)
+            return True
 
     def _artifact_set(
         self, job_id: str, page_id: int, kind: ArtifactKind, status: ArtifactStatus, options: dict
