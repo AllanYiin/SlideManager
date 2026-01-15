@@ -4,11 +4,15 @@ import asyncio
 import json
 import unittest
 
+import pytest
+
 from tests.helpers import ensure_src_path
 
 ROOT = ensure_src_path()
 
 from app.backend_daemon.event_bus import Event, EventBus, sse_format
+
+pytestmark = pytest.mark.unit
 
 
 class TestEventBus(unittest.IsolatedAsyncioTestCase):

@@ -6,11 +6,15 @@ from pathlib import Path
 
 from PIL import Image
 
+import pytest
+
 from tests.helpers import build_pdf, ensure_src_path
 
 ROOT = ensure_src_path()
 
 from app.backend_daemon.thumb_render import render_pdf_page_to_thumb, thumb_size
+
+pytestmark = pytest.mark.unit
 
 
 class TestThumbRender(unittest.TestCase):

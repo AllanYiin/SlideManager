@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+
+import pytest
 from pathlib import Path
 
 from tests.helpers import build_pptx, build_slide_xml, ensure_src_path
@@ -9,6 +11,8 @@ from tests.helpers import build_pptx, build_slide_xml, ensure_src_path
 ROOT = ensure_src_path()
 
 from app.backend_daemon.pptx_meta import detect_aspect_from_pptx
+
+pytestmark = pytest.mark.unit
 
 
 class TestPptxMeta(unittest.TestCase):

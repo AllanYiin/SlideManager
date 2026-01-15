@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+
+import pytest
 from pathlib import Path
 
 from tests.helpers import build_pptx, build_slide_xml, ensure_src_path
@@ -14,6 +16,8 @@ from app.backend_daemon.text_extract import (
     fast_text_sig,
     normalize_text,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestTextExtract(unittest.TestCase):

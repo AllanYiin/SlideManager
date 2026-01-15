@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from tests.helpers import ensure_src_path, load_schema_sql
 
 ROOT = ensure_src_path()
@@ -13,6 +15,8 @@ ROOT = ensure_src_path()
 from app.backend_daemon.config import JobOptions
 from app.backend_daemon.event_bus import EventBus
 from app.backend_daemon.job_manager import CancelToken, JobManager, PauseToken
+
+pytestmark = pytest.mark.integration
 
 
 class TestJobManagerEmbeddings(unittest.IsolatedAsyncioTestCase):
