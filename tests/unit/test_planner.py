@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-import pytest
 from pathlib import Path
 
 from tests.helpers import ensure_src_path
@@ -11,8 +10,6 @@ from tests.helpers import ensure_src_path
 ROOT = ensure_src_path()
 
 from app.backend_daemon.planner import scan_files_under
-
-pytestmark = pytest.mark.unit
 
 
 class TestPlanner(unittest.TestCase):

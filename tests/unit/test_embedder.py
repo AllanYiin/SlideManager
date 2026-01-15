@@ -5,15 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
 
 from tests.helpers import ensure_src_path
 
 ROOT = ensure_src_path()
 
 from app.backend_daemon.embedder import estimate_tokens, zero_vector, embed_text_batch_openai
-
-pytestmark = pytest.mark.unit
 
 
 class TestEmbedder(unittest.IsolatedAsyncioTestCase):

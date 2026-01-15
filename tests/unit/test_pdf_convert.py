@@ -6,15 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from tests.helpers import ensure_src_path
 
 ROOT = ensure_src_path()
 
 from app.backend_daemon.pdf_convert import convert_pptx_to_pdf_libreoffice
-
-pytestmark = pytest.mark.unit
 
 
 class TestPdfConvert(unittest.TestCase):

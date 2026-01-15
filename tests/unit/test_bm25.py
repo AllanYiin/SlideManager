@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-import pytest
 from pathlib import Path
 
 from tests.helpers import ensure_src_path, load_schema_sql
@@ -12,8 +11,6 @@ ROOT = ensure_src_path()
 
 from app.backend_daemon.bm25 import upsert_fts_page
 from app.backend_daemon.db import init_schema, open_db
-
-pytestmark = pytest.mark.unit
 
 
 class TestBm25(unittest.TestCase):

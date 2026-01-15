@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from tests.helpers import build_pptx, build_slide_xml, ensure_src_path, load_schema_sql
 
@@ -17,8 +16,6 @@ from app.backend_daemon.config import JobOptions
 from app.backend_daemon.db import now_epoch
 from app.backend_daemon.event_bus import EventBus
 from app.backend_daemon.job_manager import JobManager
-
-pytestmark = pytest.mark.integration
 
 
 class TestJobManagerControl(unittest.IsolatedAsyncioTestCase):

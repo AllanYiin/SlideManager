@@ -7,7 +7,6 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import pytest
 
 from tests.helpers import ensure_src_path, load_schema_sql
 
@@ -15,8 +14,6 @@ ROOT = ensure_src_path()
 
 from app.backend_daemon.config import JobOptions
 from app.backend_daemon.main import create_app
-
-pytestmark = pytest.mark.integration
 
 
 class TestApiContract(unittest.TestCase):

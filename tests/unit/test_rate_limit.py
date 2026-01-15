@@ -4,15 +4,12 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import pytest
 
 from tests.helpers import ensure_src_path
 
 ROOT = ensure_src_path()
 
 from app.backend_daemon.rate_limit import DualTokenBucket, backoff_delay
-
-pytestmark = pytest.mark.unit
 
 
 class TestRateLimit(unittest.IsolatedAsyncioTestCase):
