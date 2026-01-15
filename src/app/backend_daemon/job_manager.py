@@ -492,14 +492,46 @@ class JobManager:
 
                 for page_id in page_ids:
                     status_map = self._artifact_status_map(page_id)
-                    text_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.TEXT)), changed)
-                    thumb_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.THUMB)), changed)
-                    bm25_needed = self._artifact_needs_refresh(status_map.get(str(ArtifactKind.BM25)), changed)
+                    text_params = params_for_text(options)
+                    thumb_params = params_for_thumb(options, aspect)
+                    bm25_params = params_for_bm25(options)
+                    text_vec_params = params_for_text_vec(options)
+                    img_vec_params = params_for_img_vec(options, aspect)
+
+                    text_needed = self._artifact_needs_refresh(
+                        status_map.get(str(ArtifactKind.TEXT), {}).get("status"),
+                        changed,
+                        status_map.get(str(ArtifactKind.TEXT), {}).get("params"),
+                        text_params,
+                        force_refresh=True,
+                    )
+                    thumb_needed = self._artifact_needs_refresh(
+                        status_map.get(str(ArtifactKind.THUMB), {}).get("status"),
+                        changed,
+                        status_map.get(str(ArtifactKind.THUMB), {}).get("params"),
+                        thumb_params,
+                        force_refresh=True,
+                    )
+                    bm25_needed = self._artifact_needs_refresh(
+                        status_map.get(str(ArtifactKind.BM25), {}).get("status"),
+                        changed,
+                        status_map.get(str(ArtifactKind.BM25), {}).get("params"),
+                        bm25_params,
+                        force_refresh=True,
+                    )
                     text_vec_needed = self._artifact_needs_refresh(
-                        status_map.get(str(ArtifactKind.TEXT_VEC)), changed
+                        status_map.get(str(ArtifactKind.TEXT_VEC), {}).get("status"),
+                        changed,
+                        status_map.get(str(ArtifactKind.TEXT_VEC), {}).get("params"),
+                        text_vec_params,
+                        force_refresh=True,
                     )
                     img_vec_needed = self._artifact_needs_refresh(
-                        status_map.get(str(ArtifactKind.IMG_VEC)), changed
+                        status_map.get(str(ArtifactKind.IMG_VEC), {}).get("status"),
+                        changed,
+                        status_map.get(str(ArtifactKind.IMG_VEC), {}).get("params"),
+                        img_vec_params,
+                        force_refresh=True,
                     )
 
                     if options.enable_text and text_needed:
@@ -508,7 +540,7 @@ class JobManager:
                             page_id,
                             ArtifactKind.TEXT,
                             ArtifactStatus.QUEUED,
-                            options=params_for_text(options),
+                            options=text_params,
                         )
                         needs_text_task = True
                     if options.enable_thumb and options.thumb.enabled and options.pdf.enabled:
@@ -518,7 +550,7 @@ class JobManager:
                                 page_id,
                                 ArtifactKind.THUMB,
                                 ArtifactStatus.QUEUED,
-                                options=params_for_thumb(options, aspect),
+                                options=thumb_params,
                             )
                             needs_thumb_task = True
                     if options.enable_bm25 and bm25_needed:
@@ -526,7 +558,7 @@ class JobManager:
                             page_id,
                             ArtifactKind.BM25,
                             ArtifactStatus.QUEUED,
-                            options=params_for_bm25(options),
+                            options=bm25_params,
                         )
                         needs_text_task = True
                     if options.enable_text_vec and options.embed.enabled_text and text_vec_needed:
@@ -535,7 +567,7 @@ class JobManager:
                             page_id,
                             ArtifactKind.TEXT_VEC,
                             ArtifactStatus.QUEUED,
-                            options=params_for_text_vec(options),
+                            options=text_vec_params,
                         )
                         needs_text_vec_task = True
                     if (
@@ -549,7 +581,7 @@ class JobManager:
                             page_id,
                             ArtifactKind.IMG_VEC,
                             ArtifactStatus.QUEUED,
-                            options=params_for_img_vec(options),
+                            options=img_vec_params,
                         )
                         needs_img_vec_task = True
             except Exception as exc:
@@ -671,15 +703,50 @@ class JobManager:
 
         return page_ids
 
-    def _artifact_status_map(self, page_id: int) -> dict[str, str]:
+    def _artifact_status_map(self, page_id: int) -> dict[str, dict[str, object]]:
         rows = self.conn.execute(
-            "SELECT kind, status FROM artifacts WHERE page_id=?",
+            "SELECT kind, status, params_json FROM artifacts WHERE page_id=?",
             (page_id,),
         ).fetchall()
-        return {str(r["kind"]): str(r["status"]) for r in rows}
+        out: dict[str, dict[str, object]] = {}
+        for r in rows:
+            params_raw = r["params_json"]
+            params: dict[str, object] | None = None
+            if params_raw:
+                try:
+                    params = json.loads(params_raw)
+                except json.JSONDecodeError:
+                    params = None
+            out[str(r["kind"])] = {
+                "status": str(r["status"]),
+                "params": params,
+            }
+        return out
 
-    def _artifact_needs_refresh(self, status: str | None, changed: bool) -> bool:
-        return True
+    def _artifact_needs_refresh(
+        self,
+        status: str | None,
+        changed: bool,
+        prev_params: dict[str, object] | None,
+        new_params: dict[str, object],
+        force_refresh: bool = False,
+    ) -> bool:
+        if status is None:
+            return True
+        if status in (
+            ArtifactStatus.MISSING,
+            ArtifactStatus.ERROR,
+            ArtifactStatus.SKIPPED,
+            ArtifactStatus.CANCELLED,
+        ):
+            return True
+        if status in (ArtifactStatus.QUEUED, ArtifactStatus.RUNNING):
+            return True
+        if force_refresh and changed:
+            return True
+        if prev_params is None:
+            return True
+        return prev_params != new_params
 
     def _artifact_set(
         self, job_id: str, page_id: int, kind: ArtifactKind, status: ArtifactStatus, options: dict
@@ -774,6 +841,14 @@ class JobManager:
             file_id = int(r["file_id"])
             pptx_path = str(r["path"])
             page_no = int(r["page_no"])
+            prev_sig = ""
+            if options.enable_text_vec and options.embed.enabled_text:
+                prev_row = self.conn.execute(
+                    "SELECT text_sig FROM page_text WHERE page_id=?",
+                    (page_id,),
+                ).fetchone()
+                if prev_row is not None:
+                    prev_sig = str(prev_row["text_sig"] or "")
 
             now = now_epoch()
             self.conn.execute(
@@ -805,6 +880,26 @@ class JobManager:
                         "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
                         (ArtifactStatus.READY, now, page_id, ArtifactKind.BM25),
                     )
+                if options.enable_text_vec and options.embed.enabled_text:
+                    if prev_sig and prev_sig == sig:
+                        hit = self.conn.execute(
+                            "SELECT 1 FROM page_text_embedding WHERE page_id=? AND model=? AND text_sig=?",
+                            (page_id, options.embed.model_text, sig),
+                        ).fetchone()
+                        if hit is not None:
+                            now = now_epoch()
+                            self.conn.execute(
+                                "UPDATE artifacts SET status=?, updated_at=?, params_json=? WHERE page_id=? AND kind=?",
+                                (
+                                    ArtifactStatus.READY,
+                                    now,
+                                    json.dumps(
+                                        params_for_text_vec(options), ensure_ascii=False
+                                    ),
+                                    page_id,
+                                    ArtifactKind.TEXT_VEC,
+                                ),
+                            )
 
                 processed += 1
                 self._task_progress(
@@ -964,6 +1059,18 @@ class JobManager:
                             ArtifactKind.THUMB,
                         ),
                     )
+                    if options.enable_img_vec and options.embed.enabled_image:
+                        self.conn.execute(
+                            "UPDATE artifacts SET status=?, updated_at=?, error_code=?, error_message=? WHERE page_id=? AND kind=?",
+                            (
+                                ArtifactStatus.ERROR,
+                                now,
+                                "PDF_CONVERT_FAIL",
+                                str(exc)[:500],
+                                pid,
+                                ArtifactKind.IMG_VEC,
+                            ),
+                        )
                 processed_pages += len(page_rows)
                 if total_pages:
                     self._task_progress(
@@ -1692,5 +1799,14 @@ def params_for_text_vec(options: JobOptions) -> dict:
     return {"v": 1, "model": options.embed.model_text}
 
 
-def params_for_img_vec(options: JobOptions) -> dict:
-    return {"v": 1, "model": options.embed.model_image}
+def params_for_img_vec(options: JobOptions, aspect: str) -> dict:
+    return {
+        "v": 1,
+        "model": options.embed.model_image,
+        "thumb": {
+            "w": options.thumb.width,
+            "h43": options.thumb.height_4_3,
+            "h169": options.thumb.height_16_9,
+            "aspect": aspect,
+        },
+    }
