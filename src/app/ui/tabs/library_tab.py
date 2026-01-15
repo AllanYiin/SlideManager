@@ -1626,6 +1626,9 @@ class LibraryTab(QWidget):
             if page_no:
                 msg = f"完成 {kind}：{file_path} (第 {page_no} 頁)"
             self.prog_label.setText(msg)
+        elif event_type == "stats_snapshot":
+            if isinstance(ev_payload, dict):
+                self._apply_job_snapshot(ev_payload)
         elif event_type == "job_planning_finished":
             task_total = ev_payload.get("task_total")
             task_counts = ev_payload.get("task_counts")

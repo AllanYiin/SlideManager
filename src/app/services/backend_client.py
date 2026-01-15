@@ -128,6 +128,7 @@ class BackendApiClient:
             merged_options = self._merge_index_options(options)
             payload = {
                 "library_root": library_root,
+                "plan_mode": plan_mode,
                 "options": merged_options,
             }
             resp = requests.post(
@@ -137,7 +138,11 @@ class BackendApiClient:
             )
             if resp.status_code == 422:
                 log.warning("start_index_job received 422: %s", resp.text)
-                fallback_payload = {"library_root": library_root, **merged_options}
+                fallback_payload = {
+                    "library_root": library_root,
+                    "plan_mode": plan_mode,
+                    **merged_options,
+                }
                 resp = requests.post(
                     self._url("/jobs/index"),
                     json=fallback_payload,
