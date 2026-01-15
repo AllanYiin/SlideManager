@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS page_image_embedding (
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_pages
 USING fts5(page_id UNINDEXED, norm_text);
 
+CREATE TABLE IF NOT EXISTS sentence_df (
+  file_id            INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+  source_mtime_epoch INTEGER NOT NULL,
+  sentence           TEXT NOT NULL,
+  df                 REAL NOT NULL,
+  created_at         INTEGER NOT NULL,
+  PRIMARY KEY(file_id, sentence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sentence_df_file_mtime ON sentence_df(file_id, source_mtime_epoch);
+
 CREATE TABLE IF NOT EXISTS jobs (
   job_id             TEXT PRIMARY KEY,
   library_root       TEXT NOT NULL,
