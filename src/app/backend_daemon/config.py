@@ -56,3 +56,4 @@ class JobOptions(BaseModel):
     enable_sentence_df: bool = True
     sentence_df_threshold: float = 0.30
     sentence_min_len: int = 6
+    sentence_df_sample_ratio: float = 0.2

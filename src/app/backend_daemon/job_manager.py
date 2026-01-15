@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -30,7 +31,7 @@ from app.backend_daemon.event_bus import EventBus
 from app.backend_daemon.pdf_convert import convert_pptx_to_pdf_libreoffice
 from app.backend_daemon.pptx_meta import detect_aspect_from_pptx
 from app.backend_daemon.rate_limit import DualTokenBucket
-from app.backend_daemon.text_extract import extract_page_text
+from app.backend_daemon.text_extract import extract_page_text, fast_text_sig
 from app.backend_daemon.thumb_render import render_pdf_page_to_thumb, thumb_size
 from app.backend_daemon.utils_win import is_windows, which_soffice_windows
 from app.backend_daemon.planner import FileScan, scan_specific_files
@@ -793,6 +794,106 @@ class JobManager:
         placeholders = ",".join("?" for _ in file_paths)
         return f"AND f.path IN ({placeholders})", list(file_paths)
 
+    def _load_file_mtime_map(self, file_ids: list[int]) -> dict[int, int]:
+        if not file_ids:
+            return {}
+        placeholders = ",".join("?" for _ in file_ids)
+        rows = self.conn.execute(
+            f"SELECT file_id, mtime_epoch FROM files WHERE file_id IN ({placeholders})",
+            list(file_ids),
+        ).fetchall()
+        return {int(r["file_id"]): int(r["mtime_epoch"]) for r in rows}
+
+    def _ensure_sentence_df_for_files(
+        self, file_ids: list[int], options: JobOptions
+    ) -> dict[int, set[str]]:
+        if not file_ids:
+            return {}
+        if not options.enable_sentence_df:
+            return {file_id: set() for file_id in file_ids}
+
+        file_mtime_map = self._load_file_mtime_map(file_ids)
+        for file_id, mtime_epoch in file_mtime_map.items():
+            has_rows = self.conn.execute(
+                "SELECT 1 FROM sentence_df WHERE file_id=? AND source_mtime_epoch=? LIMIT 1",
+                (file_id, mtime_epoch),
+            ).fetchone()
+            if has_rows is None:
+                self._compute_sentence_df(file_id, mtime_epoch, options)
+
+        stop_sentences: dict[int, set[str]] = {}
+        for file_id, mtime_epoch in file_mtime_map.items():
+            rows = self.conn.execute(
+                "SELECT sentence FROM sentence_df WHERE file_id=? AND source_mtime_epoch=?",
+                (file_id, mtime_epoch),
+            ).fetchall()
+            stop_sentences[file_id] = {str(r["sentence"]) for r in rows}
+        return stop_sentences
+
+    def _compute_sentence_df(
+        self, file_id: int, mtime_epoch: int, options: JobOptions
+    ) -> None:
+        rows = self.conn.execute(
+            "SELECT p.page_no, pt.norm_text "
+            "FROM pages p "
+            "LEFT JOIN page_text pt ON pt.page_id=p.page_id "
+            "WHERE p.file_id=? ORDER BY p.page_no",
+            (file_id,),
+        ).fetchall()
+        if not rows:
+            return
+
+        ratio = options.sentence_df_sample_ratio
+        if ratio <= 0 or ratio > 1:
+            ratio = 1.0
+        sample_size = max(1, int(math.ceil(len(rows) * ratio)))
+        sample_rows = rows[:sample_size]
+
+        counts: dict[str, int] = {}
+        for r in sample_rows:
+            norm_text = str(r["norm_text"] or "")
+            if not norm_text:
+                continue
+            sentences = {
+                line
+                for line in norm_text.split("\n")
+                if len(line) >= options.sentence_min_len
+            }
+            for sentence in sentences:
+                counts[sentence] = counts.get(sentence, 0) + 1
+
+        denom = float(sample_size)
+        now = now_epoch()
+        self.conn.execute("DELETE FROM sentence_df WHERE file_id=?", (file_id,))
+        payload = [
+            (file_id, mtime_epoch, sentence, count / denom, now)
+            for sentence, count in counts.items()
+            if (count / denom) >= options.sentence_df_threshold
+        ]
+        if payload:
+            self.conn.executemany(
+                "INSERT INTO sentence_df(file_id,source_mtime_epoch,sentence,df,created_at) VALUES (?,?,?,?,?)",
+                payload,
+            )
+        self.conn.commit()
+        logger.info(
+            "[INDEX_SENTENCE_DF] file_id=%s sample=%d stop_sentences=%d threshold=%.2f",
+            file_id,
+            sample_size,
+            len(payload),
+            options.sentence_df_threshold,
+        )
+
+    def _filter_text_for_embedding(self, norm_text: str, stop_sentences: set[str]) -> str:
+        if not norm_text or not stop_sentences:
+            return norm_text
+        lines = [
+            line
+            for line in norm_text.split("\n")
+            if line and line not in stop_sentences
+        ]
+        return "\n".join(lines)
+
     async def _run_text_and_bm25(
         self,
         job_id: str,
@@ -841,14 +942,6 @@ class JobManager:
             file_id = int(r["file_id"])
             pptx_path = str(r["path"])
             page_no = int(r["page_no"])
-            prev_sig = ""
-            if options.enable_text_vec and options.embed.enabled_text:
-                prev_row = self.conn.execute(
-                    "SELECT text_sig FROM page_text WHERE page_id=?",
-                    (page_id,),
-                ).fetchone()
-                if prev_row is not None:
-                    prev_sig = str(prev_row["text_sig"] or "")
 
             now = now_epoch()
             self.conn.execute(
@@ -880,27 +973,6 @@ class JobManager:
                         "UPDATE artifacts SET status=?, updated_at=? WHERE page_id=? AND kind=?",
                         (ArtifactStatus.READY, now, page_id, ArtifactKind.BM25),
                     )
-                if options.enable_text_vec and options.embed.enabled_text:
-                    if prev_sig and prev_sig == sig:
-                        hit = self.conn.execute(
-                            "SELECT 1 FROM page_text_embedding WHERE page_id=? AND model=? AND text_sig=?",
-                            (page_id, options.embed.model_text, sig),
-                        ).fetchone()
-                        if hit is not None:
-                            now = now_epoch()
-                            self.conn.execute(
-                                "UPDATE artifacts SET status=?, updated_at=?, params_json=? WHERE page_id=? AND kind=?",
-                                (
-                                    ArtifactStatus.READY,
-                                    now,
-                                    json.dumps(
-                                        params_for_text_vec(options), ensure_ascii=False
-                                    ),
-                                    page_id,
-                                    ArtifactKind.TEXT_VEC,
-                                ),
-                            )
-
                 processed += 1
                 self._task_progress(
                     task_id,
@@ -1209,6 +1281,9 @@ class JobManager:
             (ArtifactKind.TEXT_VEC, ArtifactStatus.QUEUED, *filter_params),
         ).fetchall()
 
+        file_ids = sorted({int(r["file_id"]) for r in rows})
+        stop_sentences_map = self._ensure_sentence_df_for_files(file_ids, options)
+
         logger.info(
             "[INDEX_TEXT_VEC] job_id=%s queued=%d model=%s batch=%d",
             job_id,
@@ -1234,7 +1309,9 @@ class JobManager:
             pptx_path = str(r["path"])
             page_no = int(r["page_no"])
             norm = str(r["norm_text"] or "")
-            sig = str(r["text_sig"] or "")
+            stop_sentences = stop_sentences_map.get(file_id, set())
+            filtered = self._filter_text_for_embedding(norm, stop_sentences)
+            sig = fast_text_sig(filtered) if filtered else ""
 
             await pause.wait_if_paused()
             await cancel.check()
@@ -1245,7 +1322,7 @@ class JobManager:
                 (ArtifactStatus.RUNNING, now, page_id, ArtifactKind.TEXT_VEC),
             )
 
-            if not norm.strip():
+            if not filtered.strip():
                 dim = 3072
                 vb = zero_vector(dim)
                 now = now_epoch()
@@ -1301,7 +1378,7 @@ class JobManager:
                     )
                     continue
 
-            needs.append((task_id, page_id, file_id, pptx_path, norm, sig))
+            needs.append((task_id, page_id, file_id, pptx_path, filtered, sig))
 
         logger.info(
             "[INDEX_TEXT_VEC] job_id=%s needs=%d empty_text=%d cache_hit=%d",
