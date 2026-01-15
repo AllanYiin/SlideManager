@@ -9,6 +9,7 @@ onnxruntime
 openai
 pydantic
 pillow
+pytest
 pyside6
 pymupdf
 pywin32
