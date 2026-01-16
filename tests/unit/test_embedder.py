@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+
 from tests.helpers import ensure_src_path
 
 ROOT = ensure_src_path()
@@ -60,6 +61,26 @@ class TestEmbedder(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls["count"], 3)
         self.assertEqual(vecs[0], [0.1])
+
+    async def test_embed_text_batch_openai_max_retries_raises(self) -> None:
+        limiter = SimpleNamespace(acquire=AsyncMock())
+        calls = {"count": 0}
+
+        class FakeEmbeddings:
+            def create(self, model: str, input: list[str]):
+                calls["count"] += 1
+                raise RuntimeError("429")
+
+        class FakeClient:
+            embeddings = FakeEmbeddings()
+
+        with patch("app.backend_daemon.embedder.OpenAI", return_value=FakeClient()), patch(
+            "app.backend_daemon.embedder.asyncio.sleep", new=AsyncMock()
+        ):
+            with self.assertRaises(RuntimeError):
+                await embed_text_batch_openai(["a"], "m", limiter, max_retries=2)
+
+        self.assertEqual(calls["count"], 3)
 
 
 if __name__ == "__main__":

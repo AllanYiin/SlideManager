@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+
 from tests.helpers import build_pptx, build_slide_xml, ensure_src_path, load_schema_sql
 
 ROOT = ensure_src_path()

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
 from tests.helpers import ensure_src_path, load_schema_sql
 
 ROOT = ensure_src_path()

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+
 from tests.helpers import ensure_src_path
 
 ROOT = ensure_src_path()

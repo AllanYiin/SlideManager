@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+
 from tests.helpers import ensure_src_path, load_schema_sql
 
 ROOT = ensure_src_path()

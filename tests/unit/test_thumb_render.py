@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
+
 from tests.helpers import build_pdf, ensure_src_path
 
 ROOT = ensure_src_path()

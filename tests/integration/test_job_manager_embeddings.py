@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+
 from tests.helpers import ensure_src_path, load_schema_sql
 
 ROOT = ensure_src_path()

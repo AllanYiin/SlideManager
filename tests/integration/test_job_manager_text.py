@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+
 from tests.helpers import build_pptx, build_slide_xml, ensure_src_path, load_schema_sql
 
 ROOT = ensure_src_path()
@@ -75,6 +76,45 @@ class TestJobManagerText(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(page1["status"], "ready")
             self.assertNotEqual(page2["status"], "ready")
             await task
+
+    async def test_checkpoint_by_time(self) -> None:
+        pptx_path = self.root / "demo.pptx"
+        build_pptx(
+            pptx_path,
+            [build_slide_xml(["A"]), build_slide_xml(["B"])],
+            aspect="4:3",
+        )
+        options = JobOptions(
+            enable_text=True,
+            enable_bm25=False,
+            enable_thumb=False,
+            enable_text_vec=False,
+            enable_img_vec=False,
+            commit_every_pages=100,
+            commit_every_sec=0.0,
+        )
+        await self._plan_for_pptx(pptx_path, options)
+
+        q = await self.bus.subscribe("job1")
+
+        task = asyncio.create_task(
+            self.mgr._run_text_and_bm25("job1", options, CancelToken(), PauseToken())
+        )
+        ev = await asyncio.wait_for(q.get(), timeout=2)
+        self.assertEqual(ev.type, "artifact_state_changed")
+
+        from app.backend_daemon.db import open_db
+
+        reader = open_db(self.db_path)
+        try:
+            row = reader.execute(
+                "SELECT status FROM artifacts WHERE page_id=1 AND kind='text'"
+            ).fetchone()
+            self.assertEqual(row["status"], "ready")
+        finally:
+            reader.close()
+
+        await task
 
     async def test_corrupt_slide_is_skipped(self) -> None:
         pptx_path = self.root / "demo.pptx"
